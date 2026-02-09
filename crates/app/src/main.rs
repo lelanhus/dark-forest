@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,13 +19,21 @@ use games::builtin_catalog;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{BuiltinRegistry, RegistryProvider};
-use runtime::{PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner};
+use runtime::{
+    PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner, load_replay_from_path, run_replay,
+};
 use shell::{GameStatsSummary, InstalledSummary, RenderContext, Route, ShellCommand, ShellState};
 
 #[derive(Debug)]
 enum AppEvent {
     Terminal(CrosstermEvent),
     Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchMode {
+    Interactive,
+    Replay { path: PathBuf },
 }
 
 struct AppModel {
@@ -44,6 +53,50 @@ struct AppModel {
 
 fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) -> bool {
     now.duration_since(last_render_at) >= target
+}
+
+fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode> {
+    let mut args = args.into_iter();
+    let mut mode = LaunchMode::Interactive;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--replay" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--replay requires a path argument"))?;
+                mode = LaunchMode::Replay {
+                    path: PathBuf::from(path),
+                };
+            }
+            "--help" | "-h" => {
+                println!("Usage:");
+                println!("  dark-forest                 # interactive shell");
+                println!("  dark-forest --replay <path> # run replay fixture headlessly");
+                std::process::exit(0);
+            }
+            _ => {
+                return Err(anyhow::anyhow!("unknown argument: {arg}"));
+            }
+        }
+    }
+
+    Ok(mode)
+}
+
+fn run_replay_cli(path: &Path) -> Result<()> {
+    let scenario = load_replay_from_path(path)?;
+    let outcome = run_replay(&scenario, games::instantiate)?;
+
+    println!("replay.path={}", path.display());
+    println!("replay.game_id={}", scenario.game_id);
+    println!("replay.seed={}", scenario.seed);
+    println!("replay.events={}", scenario.events.len());
+    println!("replay.score={}", outcome.score);
+    println!("replay.finished={}", outcome.finished);
+    println!("replay.frame_hash={}", outcome.frame_hash);
+
+    Ok(())
 }
 
 fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
@@ -341,7 +394,10 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    run().await
+    match parse_launch_mode(std::env::args().skip(1))? {
+        LaunchMode::Interactive => run().await,
+        LaunchMode::Replay { path } => run_replay_cli(&path),
+    }
 }
 
 async fn run() -> Result<()> {
@@ -505,9 +561,10 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use super::should_render_frame;
+    use super::{LaunchMode, parse_launch_mode, should_render_frame};
 
     #[test]
     fn render_scheduler_waits_until_target_duration() {
@@ -521,5 +578,26 @@ mod tests {
         let last = Instant::now();
         let now = last + Duration::from_millis(16);
         assert!(should_render_frame(last, now, Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn parses_replay_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--replay".to_string(),
+            "fixtures/replays/snake-seed-12345.json".to_string(),
+        ])
+        .expect("replay mode should parse");
+        assert_eq!(
+            mode,
+            LaunchMode::Replay {
+                path: PathBuf::from("fixtures/replays/snake-seed-12345.json")
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_launch_argument() {
+        let error = parse_launch_mode(vec!["--nope".to_string()]);
+        assert!(error.is_err());
     }
 }
