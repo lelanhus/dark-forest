@@ -65,7 +65,7 @@ Minimum gates:
 - Formatting clean
 - Clippy clean under strict profile
 - Tests passing
-- Coverage policy satisfied (changed-path policy; currently enforced via workspace-level 85% CI gate)
+- Coverage policy tracked (changed-path policy; temporary bootstrap CI runs workspace-level 85% as advisory)
 - Docs checks passing
 - Dependency/security/license checks passing
 
