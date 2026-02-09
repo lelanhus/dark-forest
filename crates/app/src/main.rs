@@ -35,8 +35,14 @@ struct AppModel {
     play_history: content::PlayHistoryMap,
     best_scores: BTreeMap<String, i64>,
     current_game_id: Option<String>,
+    current_game_seed: Option<u64>,
     current_game_started_at: Option<Instant>,
     seed_counter: u64,
+    last_render_at: Instant,
+}
+
+fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) -> bool {
+    now.duration_since(last_render_at) >= target
 }
 
 fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
@@ -96,8 +102,10 @@ impl AppModel {
             play_history,
             best_scores,
             current_game_id: None,
+            current_game_seed: None,
             current_game_started_at: None,
             seed_counter: Utc::now().timestamp() as u64,
+            last_render_at: Instant::now(),
         })
     }
 
@@ -134,7 +142,11 @@ impl AppModel {
                 self.shell.route = Route::Runner;
                 self.shell.overlay = None;
                 self.current_game_id = Some(game_id.to_string());
+                self.current_game_seed = Some(seed);
                 self.current_game_started_at = Some(Instant::now());
+                self.last_render_at = Instant::now()
+                    .checked_sub(self.runner.target_frame_duration())
+                    .unwrap_or_else(Instant::now);
                 self.shell.push_notification(format!("Started {game_id}"));
             }
             Err(err) => self.shell.set_error(format!("unknown game: {err}")),
@@ -146,6 +158,7 @@ impl AppModel {
         self.runner.stop();
         self.shell.overlay = None;
         self.current_game_id = None;
+        self.current_game_seed = None;
         self.current_game_started_at = None;
     }
 
@@ -271,6 +284,18 @@ impl AppModel {
             },
         }
     }
+
+    fn maybe_render_runner_frame(&mut self, now: Instant) {
+        if !self.runner.is_running() {
+            return;
+        }
+
+        let target = self.runner.target_frame_duration();
+        if should_render_frame(self.last_render_at, now, target) {
+            let _ = self.runner.render();
+            self.last_render_at = now;
+        }
+    }
 }
 
 #[tokio::main]
@@ -352,10 +377,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
             match event {
                 AppEvent::Tick => {
                     let _ = model.runner.dispatch(RuntimeEvent::Tick { dt_ms: 16 });
-
-                    if model.runner.is_running() {
-                        let _ = model.runner.render();
-                    }
+                    model.maybe_render_runner_frame(Instant::now());
 
                     for signal in model.runner.take_signals() {
                         model.apply_runner_signal(signal);
@@ -442,4 +464,25 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::should_render_frame;
+
+    #[test]
+    fn render_scheduler_waits_until_target_duration() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(10);
+        assert!(!should_render_frame(last, now, Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn render_scheduler_allows_render_when_target_elapsed() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(16);
+        assert!(should_render_frame(last, now, Duration::from_millis(16)));
+    }
 }
