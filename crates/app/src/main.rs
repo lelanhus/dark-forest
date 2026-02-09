@@ -19,7 +19,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{BuiltinRegistry, RegistryProvider};
 use runtime::{PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner};
-use shell::{GameStatsSummary, RenderContext, Route, ShellCommand, ShellState};
+use shell::{GameStatsSummary, InstalledSummary, RenderContext, Route, ShellCommand, ShellState};
 
 #[derive(Debug)]
 enum AppEvent {
@@ -33,6 +33,7 @@ struct AppModel {
     store: JsonContentStore,
     settings: content::Settings,
     play_history: content::PlayHistoryMap,
+    installed: content::InstalledFile,
     best_scores: BTreeMap<String, i64>,
     current_game_id: Option<String>,
     current_game_seed: Option<u64>,
@@ -53,6 +54,23 @@ fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
         .map(|(id, _ts)| id.clone())
 }
 
+fn ensure_builtin_installed(
+    mut installed: content::InstalledFile,
+    games: &[shell::GameItem],
+) -> content::InstalledFile {
+    for game in games {
+        let exists = installed.installed.iter().any(|item| item.id == game.id);
+        if !exists {
+            installed.installed.push(content::InstalledRecord {
+                id: game.id.clone(),
+                source: "builtin://dark-forest".to_string(),
+                current_version: "0.1.0".to_string(),
+            });
+        }
+    }
+    installed
+}
+
 impl AppModel {
     fn new() -> Result<Self> {
         let listings = builtin_catalog();
@@ -71,6 +89,8 @@ impl AppModel {
         store.ensure_layout()?;
         let settings = store.load_settings()?;
         let play_history = store.load_play_history()?;
+        let installed = ensure_builtin_installed(store.load_installed()?, &games);
+        let _ = store.save_installed(&installed);
         let mut best_scores = BTreeMap::new();
 
         for game in &games {
@@ -100,6 +120,7 @@ impl AppModel {
             store,
             settings,
             play_history,
+            installed,
             best_scores,
             current_game_id: None,
             current_game_seed: None,
@@ -259,6 +280,20 @@ impl AppModel {
                 },
             );
         }
+        let installed = self
+            .installed
+            .installed
+            .iter()
+            .map(|item| {
+                (
+                    item.id.clone(),
+                    InstalledSummary {
+                        current_version: item.current_version.clone(),
+                        source: item.source.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
         RenderContext {
             current_game: self.current_game_id.clone(),
@@ -271,6 +306,7 @@ impl AppModel {
             runner_fullscreen: self.runner.is_fullscreen(),
             perf_summary: mode_label,
             game_stats,
+            installed,
         }
     }
 
@@ -451,6 +487,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     model.update_play_stats();
     model.store.save_settings(&model.settings)?;
     model.store.save_play_history(&model.play_history)?;
+    model.store.save_installed(&model.installed)?;
 
     let snapshot = model.diagnostics_snapshot();
     tracing::info!(

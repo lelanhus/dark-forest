@@ -14,6 +14,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Runtime tests for auto-performance transition signaling and pause/resume event dispatch.
 - Fixture-driven replay harness in `runtime` with typed replay events and deterministic outcome hashing.
 - Home route now follows `Continue`, `Featured`, `Recently Played`, and `Updates` sections with persisted continue-target routing.
+- Installed route now renders version/source metadata and planned verify/rollback/update actions.
+- Content store now supports loading/saving `installed.json` records with tests.
 
 ### Changed
 
