@@ -62,5 +62,6 @@ The `main` branch must require all mandatory quality checks before merge.
 Required workflow statuses:
 
 - `docs-quality`
-- `policy-checks`
 - `rust-quality`
+- `semantic-pr-title`
+- `dco-signoff`

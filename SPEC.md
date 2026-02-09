@@ -401,7 +401,7 @@ Reliability requirements:
 
 ## 14) Data model (host-managed)
 
-Stored locally under `~/.tui-arcade/` (exact file formats can evolve).
+Stored locally under `~/.dark-forest/` (exact file formats can evolve).
 
 Core entities:
 

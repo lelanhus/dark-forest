@@ -1,0 +1,19 @@
+[package]
+name = "shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+runtime = { path = "../runtime" }
+theme = { path = "../theme" }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[lints]
+workspace = true

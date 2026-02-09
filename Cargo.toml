@@ -1,0 +1,43 @@
+[workspace]
+members = [
+  "crates/app",
+  "crates/shell",
+  "crates/runtime",
+  "crates/content",
+  "crates/registry",
+  "crates/plugin-host",
+  "crates/games",
+  "crates/theme",
+  "crates/diagnostics",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT OR Apache-2.0"
+authors = ["Dark Forest Contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+bitflags = "2.8"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+crossterm = "0.29"
+directories = "6.0"
+rand = "0.9"
+rand_pcg = "0.9"
+ratatui = { version = "0.29", features = ["all-widgets"] }
+semver = { version = "1.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"

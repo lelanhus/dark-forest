@@ -1,0 +1,20 @@
+[package]
+name = "registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+plugin-host = { path = "../plugin-host" }
+
+[dev-dependencies]
+proptest = "1.6"
+
+[lints]
+workspace = true

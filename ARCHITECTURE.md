@@ -65,6 +65,7 @@ Policy gates:
 - Runtime/game interface follows state-machine contract from `SPEC.md`.
 - Manifest and persisted entities are defined in `DATA_MODEL.md`.
 - Architecture/security/performance changes require ADR updates.
+- Host-managed persistent data root is `~/.dark-forest/` (platform abstractions map to OS-specific paths).
 
 ## Observability Contract
 
