@@ -14,8 +14,9 @@ These rules apply to every change in this repository, including documentation-on
 4. Implement the minimum change to pass tests.
 5. Run formatting, linting, tests, and docs checks.
 6. Update documentation and ADRs when architecture, security, performance, or policy changes.
-7. Push a `codex/<topic>` branch and open a PR to `main`.
-8. Merge only after all required checks are green.
+7. Branch from local `main` using `codex/<topic>`.
+8. Merge branch into local `main` only after local quality gates are green.
+9. Push updated `main` to `origin`.
 
 ## Non-Negotiable Rules
 
@@ -23,18 +24,18 @@ These rules apply to every change in this repository, including documentation-on
 - No `unsafe` Rust in production paths unless an ADR-approved exception exists.
 - No silent behavior changes without changelog and test impact notes.
 - No bypass of required quality gates.
-- No direct pushes to `main`; use PRs only.
+- Do not push failing code to `main`.
 
-## Git and PR Workflow
+## Git Workflow
 
-`main` is branch-protected and must remain PR-only.
+`main` is maintained through local branch integration and direct push after validation.
 
 1. Branch from `main` using `codex/<topic>`.
 2. Commit with Conventional Commits and DCO sign-off.
-3. Push branch and open PR to `main`.
-4. Required checks must pass: `docs-quality`, `rust-quality`, `semantic-pr-title`, `dco-signoff`.
-5. Merge when checks are green; required approving reviews are set to `0` for solo-maintainer flow.
-6. Keep linear history; use squash or rebase merges only.
+3. Run local quality gates before integration: `make ci`.
+4. Merge branch into local `main` (prefer `--no-ff` to preserve branch history context).
+5. Push `main` to origin.
+6. PRs are optional and primarily used for external collaboration or design review.
 
 ## Command Standards
 
@@ -53,12 +54,14 @@ Standard local entrypoints:
 - `make ci-docs`
 - `make ci-rust`
 - `make ci`
-- `gh pr create --base main --head codex/<topic> --title \"<type>: <summary>\" --body \"...\"`
-- `gh pr merge --squash --delete-branch`
+- `git switch main && git pull --ff-only`
+- `git switch -c codex/<topic>`
+- `git switch main && git merge --no-ff codex/<topic>`
+- `git push origin main`
 
 ## Lint and Test Gate Expectations
 
-A change is not ready for review unless all required checks pass locally and in CI.
+A change is not ready for merge unless all required checks pass locally.
 
 Minimum gates:
 
