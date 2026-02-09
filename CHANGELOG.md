@@ -19,6 +19,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - App event pipeline now uses a bounded queue with controlled dropping for repeated non-critical navigation keys.
 - Auto performance mode now emits explicit `PerfModeChanged` signals when auto target shifts between 60 and 30 FPS.
+- Runner rendering now honors target frame cadence (30/60/auto) independently from fixed tick simulation cadence.
 
 ### Deprecated
 
