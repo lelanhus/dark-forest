@@ -13,6 +13,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Game Detail stats summary (plays, best score, last played).
 - Runtime tests for auto-performance transition signaling and pause/resume event dispatch.
 - Fixture-driven replay harness in `runtime` with typed replay events and deterministic outcome hashing.
+- Home route now follows `Continue`, `Featured`, `Recently Played`, and `Updates` sections with persisted continue-target routing.
 
 ### Changed
 
