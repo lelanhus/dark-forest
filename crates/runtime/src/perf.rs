@@ -40,11 +40,12 @@ impl Default for AutoPerfController {
 }
 
 impl AutoPerfController {
-    pub fn record_render_ms(&mut self, render_ms: f32) {
+    pub fn record_render_ms(&mut self, render_ms: f32) -> Option<u16> {
         if self.window.len() == self.capacity {
             let _ = self.window.pop_front();
         }
         self.window.push_back(render_ms);
+        let previous = self.target;
 
         let avg = self.average_render_ms();
         if self.target == 60 {
@@ -67,6 +68,12 @@ impl AutoPerfController {
             }
         } else {
             self.recover_counter = 0;
+        }
+
+        if previous != self.target {
+            Some(self.target)
+        } else {
+            None
         }
     }
 
@@ -95,12 +102,12 @@ mod tests {
         let mut perf = AutoPerfController::default();
 
         for _ in 0..80 {
-            perf.record_render_ms(12.0);
+            let _ = perf.record_render_ms(12.0);
         }
         assert_eq!(perf.target_fps(), 30);
 
         for _ in 0..260 {
-            perf.record_render_ms(7.0);
+            let _ = perf.record_render_ms(7.0);
         }
         assert_eq!(perf.target_fps(), 60);
     }

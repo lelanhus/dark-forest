@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -24,6 +26,16 @@ pub enum Overlay {
     Notifications,
     Progress,
     ErrorDetail,
+    RunnerPauseMenu,
+    RunnerQuitConfirm,
+    RunnerRestartConfirm,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GameStatsSummary {
+    pub play_count: u64,
+    pub best_score: Option<i64>,
+    pub last_played_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +80,7 @@ pub struct RenderContext {
     pub runner_paused: bool,
     pub runner_fullscreen: bool,
     pub perf_summary: String,
+    pub game_stats: BTreeMap<String, GameStatsSummary>,
 }
 
 impl Default for RenderContext {
@@ -78,6 +91,7 @@ impl Default for RenderContext {
             runner_paused: false,
             runner_fullscreen: false,
             perf_summary: "fps:auto".to_string(),
+            game_stats: BTreeMap::new(),
         }
     }
 }
@@ -111,9 +125,14 @@ impl ShellState {
         self.overlay = Some(Overlay::ErrorDetail);
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, has_running_game: bool) -> Vec<ShellCommand> {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        has_running_game: bool,
+        runner_paused: bool,
+    ) -> Vec<ShellCommand> {
         if let Some(active_overlay) = self.overlay {
-            return self.handle_overlay_key(key, active_overlay);
+            return self.handle_overlay_key(key, active_overlay, has_running_game, runner_paused);
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -129,27 +148,107 @@ impl ShellState {
         match key.code {
             KeyCode::Char('/') => vec![ShellCommand::SetOverlay(Some(Overlay::Search))],
             KeyCode::Char('?') => vec![ShellCommand::SetOverlay(Some(Overlay::Help))],
-            _ => self.handle_route_key(key, has_running_game),
+            _ => self.handle_route_key(key, has_running_game, runner_paused),
         }
     }
 
-    fn handle_overlay_key(&mut self, key: KeyEvent, overlay: Overlay) -> Vec<ShellCommand> {
-        match key.code {
-            KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
-            KeyCode::Char('n') if overlay == Overlay::Help => {
-                vec![ShellCommand::SetOverlay(Some(Overlay::Notifications))]
+    fn handle_overlay_key(
+        &mut self,
+        key: KeyEvent,
+        overlay: Overlay,
+        has_running_game: bool,
+        runner_paused: bool,
+    ) -> Vec<ShellCommand> {
+        match overlay {
+            Overlay::RunnerPauseMenu => {
+                if !has_running_game {
+                    return vec![ShellCommand::SetOverlay(None)];
+                }
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('p') | KeyCode::Char('P') => {
+                        vec![ShellCommand::TogglePause, ShellCommand::SetOverlay(None)]
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        vec![ShellCommand::SetOverlay(Some(
+                            Overlay::RunnerRestartConfirm,
+                        ))]
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        vec![ShellCommand::SetOverlay(Some(Overlay::RunnerQuitConfirm))]
+                    }
+                    _ => vec![ShellCommand::None],
+                }
             }
-            _ => vec![ShellCommand::None],
+            Overlay::RunnerQuitConfirm => {
+                if !has_running_game {
+                    return vec![ShellCommand::SetOverlay(None)];
+                }
+
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => vec![
+                        ShellCommand::StopGame,
+                        ShellCommand::OpenRoute(Route::Library),
+                        ShellCommand::SetOverlay(None),
+                    ],
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if runner_paused {
+                            vec![ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu))]
+                        } else {
+                            vec![ShellCommand::SetOverlay(None)]
+                        }
+                    }
+                    _ => vec![ShellCommand::None],
+                }
+            }
+            Overlay::RunnerRestartConfirm => {
+                if !has_running_game {
+                    return vec![ShellCommand::SetOverlay(None)];
+                }
+
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        if runner_paused {
+                            vec![
+                                ShellCommand::RestartGame,
+                                ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu)),
+                            ]
+                        } else {
+                            vec![ShellCommand::RestartGame, ShellCommand::SetOverlay(None)]
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if runner_paused {
+                            vec![ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu))]
+                        } else {
+                            vec![ShellCommand::SetOverlay(None)]
+                        }
+                    }
+                    _ => vec![ShellCommand::None],
+                }
+            }
+            _ => match key.code {
+                KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
+                KeyCode::Char('n') if overlay == Overlay::Help => {
+                    vec![ShellCommand::SetOverlay(Some(Overlay::Notifications))]
+                }
+                _ => vec![ShellCommand::None],
+            },
         }
     }
 
-    fn handle_route_key(&mut self, key: KeyEvent, has_running_game: bool) -> Vec<ShellCommand> {
+    fn handle_route_key(
+        &mut self,
+        key: KeyEvent,
+        has_running_game: bool,
+        runner_paused: bool,
+    ) -> Vec<ShellCommand> {
         match self.route.clone() {
             Route::Home => self.handle_home_key(key),
             Route::Library | Route::Installed => self.handle_library_key(key),
             Route::Settings => self.handle_settings_key(key),
             Route::GameDetail { id } => self.handle_detail_key(key, id),
-            Route::Runner => self.handle_runner_key(key, has_running_game),
+            Route::Runner => self.handle_runner_key(key, has_running_game, runner_paused),
         }
     }
 
@@ -222,18 +321,33 @@ impl ShellState {
         }
     }
 
-    fn handle_runner_key(&mut self, key: KeyEvent, has_running_game: bool) -> Vec<ShellCommand> {
+    fn handle_runner_key(
+        &mut self,
+        key: KeyEvent,
+        has_running_game: bool,
+        runner_paused: bool,
+    ) -> Vec<ShellCommand> {
         if !has_running_game {
             return vec![ShellCommand::OpenRoute(Route::Library)];
         }
 
         match key.code {
-            KeyCode::Esc => vec![
-                ShellCommand::StopGame,
-                ShellCommand::OpenRoute(Route::Library),
-            ],
-            KeyCode::Char('p') | KeyCode::Char('P') => vec![ShellCommand::TogglePause],
-            KeyCode::Char('r') | KeyCode::Char('R') => vec![ShellCommand::RestartGame],
+            KeyCode::Esc => vec![ShellCommand::SetOverlay(Some(Overlay::RunnerQuitConfirm))],
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if runner_paused {
+                    vec![ShellCommand::TogglePause, ShellCommand::SetOverlay(None)]
+                } else {
+                    vec![
+                        ShellCommand::TogglePause,
+                        ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu)),
+                    ]
+                }
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                vec![ShellCommand::SetOverlay(Some(
+                    Overlay::RunnerRestartConfirm,
+                ))]
+            }
             KeyCode::Char('f') | KeyCode::Char('F') => vec![ShellCommand::ToggleFullscreen],
             _ => vec![ShellCommand::None],
         }
@@ -266,7 +380,7 @@ pub fn render(frame: &mut ratatui::Frame<'_>, state: &ShellState, context: &Rend
         Route::Library => render_library(frame, body, state, "Library"),
         Route::Installed => render_library(frame, body, state, "Installed"),
         Route::Settings => render_settings(frame, body, state),
-        Route::GameDetail { id } => render_detail(frame, body, state, id),
+        Route::GameDetail { id } => render_detail(frame, body, state, context, id),
         Route::Runner => render_runner(frame, body, context),
     }
 
@@ -397,14 +511,30 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellStat
     );
 }
 
-fn render_detail(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState, id: &str) {
+fn render_detail(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &ShellState,
+    context: &RenderContext,
+    id: &str,
+) {
     let selected = state.games.iter().find(|g| g.id == *id);
+    let stats = context.game_stats.get(id).cloned().unwrap_or_default();
+    let best_score = stats
+        .best_score
+        .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+    let last_played = stats.last_played_at.unwrap_or_else(|| "never".to_string());
+
     let text = selected.map_or_else(
         || format!("Unknown game: {id}"),
         |game| {
             format!(
-                "{}\n\n{}\n\nControls:\n- Move: arrows or WASD\n- Pause: P\n- Restart: R\n- Exit: Esc\n\nPress Enter to start. Esc to go back.",
-                game.name, game.description
+                "{}\n\n{}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nPress Enter to start. Esc to go back.",
+                game.name,
+                game.description,
+                stats.play_count,
+                best_score,
+                last_played
             )
         },
     );
@@ -586,6 +716,18 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
                 .clone()
                 .unwrap_or_else(|| "No error details available".to_string()),
         ),
+        Overlay::RunnerPauseMenu => (
+            "Paused",
+            "Game paused.\n\nPress P or Enter to resume.\nPress R to restart (confirm).\nPress Q or Esc to exit (confirm).".to_string(),
+        ),
+        Overlay::RunnerQuitConfirm => (
+            "Quit Game?",
+            "Press Y or Enter to quit.\nPress N or Esc to cancel.".to_string(),
+        ),
+        Overlay::RunnerRestartConfirm => (
+            "Restart Game?",
+            "Press Y or Enter to restart.\nPress N or Esc to cancel.".to_string(),
+        ),
     };
 
     frame.render_widget(
@@ -670,13 +812,18 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
-    use super::{GameItem, Overlay, RenderContext, Route, ShellCommand, ShellState, render};
+    use super::{
+        GameItem, GameStatsSummary, Overlay, RenderContext, Route, ShellCommand, ShellState, render,
+    };
 
     #[test]
     fn route_transitions_from_home_to_library() {
         let mut state = ShellState::new(sample_games());
-        let commands =
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()), false);
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
         assert!(matches!(
             commands[0],
             ShellCommand::OpenRoute(Route::Library)
@@ -688,6 +835,7 @@ mod tests {
         let mut state = ShellState::new(sample_games());
         let commands = state.handle_key(
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            false,
             false,
         );
         assert!(matches!(
@@ -704,8 +852,14 @@ mod tests {
         let commands = state.handle_key(
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()),
             true,
+            false,
         );
+        assert_eq!(commands.len(), 2);
         assert!(matches!(commands[0], ShellCommand::TogglePause));
+        assert!(matches!(
+            commands[1],
+            ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu))
+        ));
     }
 
     #[test]
@@ -759,8 +913,78 @@ mod tests {
     fn selected_game_tracks_list_index() {
         let mut state = ShellState::new(sample_games());
         state.route = Route::Library;
-        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()), false);
+        state.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            false,
+            false,
+        );
         let selected_id = state.selected_game().map(|g| g.id.as_str());
         assert_eq!(selected_id, Some("tetris-like"));
+    }
+
+    #[test]
+    fn runner_esc_requests_quit_confirmation() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            true,
+            false,
+        );
+
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0],
+            ShellCommand::SetOverlay(Some(Overlay::RunnerQuitConfirm))
+        ));
+    }
+
+    #[test]
+    fn quit_confirmation_accepts_y() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        state.overlay = Some(Overlay::RunnerQuitConfirm);
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()),
+            true,
+            true,
+        );
+
+        assert_eq!(commands.len(), 3);
+        assert!(matches!(commands[0], ShellCommand::StopGame));
+        assert!(matches!(
+            commands[1],
+            ShellCommand::OpenRoute(Route::Library)
+        ));
+        assert!(matches!(commands[2], ShellCommand::SetOverlay(None)));
+    }
+
+    #[test]
+    fn detail_screen_renders_stats() -> std::io::Result<()> {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "snake-plus".to_string(),
+        };
+
+        let mut context = RenderContext::default();
+        context.game_stats.insert(
+            "snake-plus".to_string(),
+            GameStatsSummary {
+                play_count: 12,
+                best_score: Some(420),
+                last_played_at: Some("2026-02-09T00:00:00Z".to_string()),
+            },
+        );
+
+        terminal.draw(|frame| {
+            render(frame, &state, &context);
+        })?;
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_buffer_contains(&buffer, "Best score");
+        assert_buffer_contains(&buffer, "420");
+        Ok(())
     }
 }
