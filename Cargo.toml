@@ -23,7 +23,7 @@ authors = ["Dark Forest Contributors"]
 anyhow = "1.0"
 bitflags = "2.8"
 chrono = { version = "0.4", features = ["clock", "serde"] }
-crossterm = "0.29"
+crossterm = "0.28"
 directories = "6.0"
 rand = "0.9"
 rand_pcg = "0.9"
