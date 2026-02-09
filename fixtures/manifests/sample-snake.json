@@ -1,0 +1,10 @@
+{
+  "id": "snake-plus",
+  "name": "Snake+",
+  "version": "0.1.0",
+  "author": "Dark Forest",
+  "entry_type": "native",
+  "entry": "builtin:snake-plus",
+  "host_api": "^0.1",
+  "permissions": ["terminal.raw_input"]
+}

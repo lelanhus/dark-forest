@@ -1,0 +1,12 @@
+{
+  "game_id": "snake-plus",
+  "seed": 12345,
+  "events": [
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 120},
+    {"type": "input", "key": "Down"},
+    {"type": "tick", "dt_ms": 120},
+    {"type": "input", "key": "Left"},
+    {"type": "tick", "dt_ms": 120}
+  ]
+}

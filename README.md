@@ -33,6 +33,8 @@ Planned top-level areas:
 
 Detailed architecture contract: `ARCHITECTURE.md`.
 
+Local host-managed data root: `~/.dark-forest/`.
+
 ## Target Platforms
 
 - Linux (`x86_64`, `aarch64`) with Pi-class devices as a priority.

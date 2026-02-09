@@ -1,0 +1,26 @@
+[package]
+name = "dark-forest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+content = { path = "../content" }
+diagnostics = { path = "../diagnostics" }
+games = { path = "../games" }
+registry = { path = "../registry" }
+runtime = { path = "../runtime" }
+shell = { path = "../shell" }
+theme = { path = "../theme" }
+
+[lints]
+workspace = true

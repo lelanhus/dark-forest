@@ -1,0 +1,20 @@
+[package]
+name = "games"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
+ratatui.workspace = true
+registry = { path = "../registry" }
+runtime = { path = "../runtime" }
+plugin-host = { path = "../plugin-host" }
+
+[lints]
+workspace = true

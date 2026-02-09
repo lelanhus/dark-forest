@@ -8,8 +8,8 @@ Primary source: `SPEC.md`.
 
 Default host-managed data root:
 
-- Unix-like systems: `~/.tui-arcade/`
-- Windows (planned): `%LOCALAPPDATA%/tui-arcade/`
+- Unix-like systems: `~/.dark-forest/`
+- Windows (planned): `%LOCALAPPDATA%/dark-forest/`
 
 Paths must be resolved through a platform abstraction. Do not hardcode separators.
 

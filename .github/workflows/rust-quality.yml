@@ -14,9 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-quality:
+  rust-quality-linux:
+    name: rust-quality-linux
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,8 +33,7 @@ jobs:
 
       - name: Skip (workspace not initialized)
         if: steps.detect.outputs.has_cargo != 'true'
-        run: |
-          echo "No Cargo.toml found. Rust checks are deferred until workspace scaffolding exists."
+        run: echo "No Cargo.toml found. Rust checks are deferred until workspace scaffolding exists."
 
       - name: Setup Rust toolchain
         if: steps.detect.outputs.has_cargo == 'true'
@@ -57,9 +57,17 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-      - name: Rust test suite
+      - name: Unit and integration tests
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Snapshot tests
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test -p shell renders_shell_at_common_sizes
+
+      - name: Replay tests
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test -p dark-forest snake_replay_is_deterministic
 
       - name: Install cargo-llvm-cov
         if: steps.detect.outputs.has_cargo == 'true'
@@ -67,8 +75,7 @@ jobs:
 
       - name: Coverage gate (line coverage >= 85%)
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          cargo llvm-cov --workspace --all-features --all-targets --summary-only --fail-under-lines 85
+        run: cargo llvm-cov --workspace --all-features --all-targets --summary-only --fail-under-lines 85
 
       - name: Install cargo-deny
         if: steps.detect.outputs.has_cargo == 'true'
@@ -77,3 +84,67 @@ jobs:
       - name: Dependency, security, and license checks
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo deny check advisories licenses bans sources
+
+  rust-quality-macos:
+    name: rust-quality-macos
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Rust workspace
+        id: detect
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip (workspace not initialized)
+        if: steps.detect.outputs.has_cargo != 'true'
+        run: echo "No Cargo.toml found. Rust checks are deferred until workspace scaffolding exists."
+
+      - name: Setup Rust toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust artifacts
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rust format check
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy check
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Unit and integration tests
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test --workspace --all-targets --all-features
+
+      - name: Snapshot tests
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test -p shell renders_shell_at_common_sizes
+
+      - name: Replay tests
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test -p dark-forest snake_replay_is_deterministic
+
+  rust-quality:
+    name: rust-quality
+    runs-on: ubuntu-latest
+    needs: [rust-quality-linux, rust-quality-macos]
+    if: ${{ always() }}
+    steps:
+      - name: Finalize rust quality status
+        run: |
+          if [ "${{ needs.rust-quality-linux.result }}" != "success" ] || [ "${{ needs.rust-quality-macos.result }}" != "success" ]; then
+            echo "rust-quality matrix failed"
+            exit 1
+          fi
