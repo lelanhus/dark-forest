@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,7 +19,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{BuiltinRegistry, RegistryProvider};
 use runtime::{PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner};
-use shell::{RenderContext, Route, ShellCommand, ShellState};
+use shell::{GameStatsSummary, RenderContext, Route, ShellCommand, ShellState};
 
 #[derive(Debug)]
 enum AppEvent {
@@ -32,6 +33,7 @@ struct AppModel {
     store: JsonContentStore,
     settings: content::Settings,
     play_history: content::PlayHistoryMap,
+    best_scores: BTreeMap<String, i64>,
     current_game_id: Option<String>,
     current_game_started_at: Option<Instant>,
     seed_counter: u64,
@@ -55,6 +57,15 @@ impl AppModel {
         store.ensure_layout()?;
         let settings = store.load_settings()?;
         let play_history = store.load_play_history()?;
+        let mut best_scores = BTreeMap::new();
+
+        for game in &games {
+            if let Ok(scores) = store.load_high_scores(&game.id)
+                && let Some(best) = scores.entries.first()
+            {
+                best_scores.insert(game.id.clone(), best.score);
+            }
+        }
 
         let (width, height) = terminal::size().unwrap_or((120, 40));
         let mut runner = RuntimeRunner::new(width.saturating_sub(4), height.saturating_sub(8));
@@ -72,6 +83,7 @@ impl AppModel {
             store,
             settings,
             play_history,
+            best_scores,
             current_game_id: None,
             current_game_started_at: None,
             seed_counter: Utc::now().timestamp() as u64,
@@ -101,14 +113,15 @@ impl AppModel {
     }
 
     fn start_game(&mut self, game_id: &str) {
-        match games::instantiate(game_id, self.next_seed()) {
+        let seed = self.next_seed();
+        match games::instantiate(game_id, seed) {
             Ok(game) => {
-                let seed = self.next_seed();
                 if let Err(err) = self.runner.start(game, seed) {
                     self.shell.set_error(format!("failed to start game: {err}"));
                     return;
                 }
                 self.shell.route = Route::Runner;
+                self.shell.overlay = None;
                 self.current_game_id = Some(game_id.to_string());
                 self.current_game_started_at = Some(Instant::now());
                 self.shell.push_notification(format!("Started {game_id}"));
@@ -120,6 +133,7 @@ impl AppModel {
     fn stop_game(&mut self) {
         self.update_play_stats();
         self.runner.stop();
+        self.shell.overlay = None;
         self.current_game_id = None;
         self.current_game_started_at = None;
     }
@@ -151,6 +165,11 @@ impl AppModel {
             Err(_) => content::HighScores::empty(&game_id),
         };
         scores.push_score(self.runner.score());
+        if let Some(best) = scores.entries.first() {
+            self.best_scores.insert(game_id.clone(), best.score);
+        } else {
+            self.best_scores.remove(&game_id);
+        }
 
         let _ = self.store.save_high_scores(&game_id, &scores);
         let _ = self.store.save_play_history(&self.play_history);
@@ -199,6 +218,22 @@ impl AppModel {
             PerfMode::Fps60 => "mode:60".to_string(),
             PerfMode::Fps30 => "mode:30".to_string(),
         };
+        let mut game_stats = BTreeMap::new();
+        for game in &self.shell.games {
+            let history = self.play_history.get(&game.id);
+            game_stats.insert(
+                game.id.clone(),
+                GameStatsSummary {
+                    play_count: history.map_or(0, |item| item.play_count),
+                    best_score: self.best_scores.get(&game.id).copied(),
+                    last_played_at: history.and_then(|item| {
+                        item.last_played_at
+                            .as_ref()
+                            .map(chrono::DateTime::<Utc>::to_rfc3339)
+                    }),
+                },
+            );
+        }
 
         RenderContext {
             current_game: self.current_game_id.clone(),
@@ -210,6 +245,7 @@ impl AppModel {
             runner_paused: self.runner.is_paused(),
             runner_fullscreen: self.runner.is_fullscreen(),
             perf_summary: mode_label,
+            game_stats,
         }
     }
 
@@ -256,7 +292,7 @@ async fn run() -> Result<()> {
 async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let mut model = AppModel::new()?;
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
     let running = Arc::new(AtomicBool::new(true));
 
     let input_running = Arc::clone(&running);
@@ -266,7 +302,24 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
             if event::poll(Duration::from_millis(20)).unwrap_or(false)
                 && let Ok(evt) = event::read()
             {
-                let _ = input_tx.send(AppEvent::Terminal(evt));
+                match input_tx.try_send(AppEvent::Terminal(evt)) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(AppEvent::Terminal(
+                        CrosstermEvent::Key(key),
+                    ))) if matches!(
+                        key.code,
+                        KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Char('j')
+                            | KeyCode::Char('k')
+                    ) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+                        let _ = input_tx.blocking_send(event);
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                }
             }
         }
     });
@@ -277,7 +330,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
         let mut interval = tokio::time::interval(Duration::from_millis(16));
         while tick_running.load(Ordering::SeqCst) {
             interval.tick().await;
-            let _ = tick_tx.send(AppEvent::Tick);
+            let _ = tick_tx.try_send(AppEvent::Tick);
         }
     });
 
@@ -313,7 +366,11 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                             continue;
                         }
 
-                        let commands = model.shell.handle_key(key, model.runner.is_running());
+                        let commands = model.shell.handle_key(
+                            key,
+                            model.runner.is_running(),
+                            model.runner.is_paused(),
+                        );
                         let forwarded_to_runner =
                             commands.iter().all(|cmd| matches!(cmd, ShellCommand::None))
                                 && matches!(model.shell.route, Route::Runner)
