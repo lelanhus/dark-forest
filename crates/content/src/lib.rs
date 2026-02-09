@@ -120,6 +120,8 @@ pub trait ContentStore {
     fn save_settings(&self, settings: &Settings) -> Result<()>;
     fn load_play_history(&self) -> Result<PlayHistoryMap>;
     fn save_play_history(&self, history: &PlayHistoryMap) -> Result<()>;
+    fn load_installed(&self) -> Result<InstalledFile>;
+    fn save_installed(&self, installed: &InstalledFile) -> Result<()>;
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores>;
     fn save_high_scores(&self, game_id: &str, scores: &HighScores) -> Result<()>;
 }
@@ -318,6 +320,17 @@ impl ContentStore for JsonContentStore {
         self.atomic_write_json(&self.play_history_path(), &file)
     }
 
+    fn load_installed(&self) -> Result<InstalledFile> {
+        self.ensure_layout()?;
+        let path = self.installed_path();
+        let loaded = self.read_json_or_quarantine::<InstalledFile>(&path)?;
+        Ok(loaded.unwrap_or_default())
+    }
+
+    fn save_installed(&self, installed: &InstalledFile) -> Result<()> {
+        self.atomic_write_json(&self.installed_path(), installed)
+    }
+
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores> {
         self.ensure_layout()?;
         let path = self.high_score_path(game_id);
@@ -387,6 +400,24 @@ mod tests {
 
         let quarantine_dir = root.join("quarantine");
         assert!(quarantine_dir.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn saves_and_loads_installed_records() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(PathBuf::from(temp.path()));
+        let mut installed = store.load_installed()?;
+        installed.installed.push(super::InstalledRecord {
+            id: "snake-plus".to_string(),
+            source: "builtin://dark-forest".to_string(),
+            current_version: "0.1.0".to_string(),
+        });
+        store.save_installed(&installed)?;
+
+        let reloaded = store.load_installed()?;
+        assert_eq!(reloaded.installed.len(), 1);
+        assert_eq!(reloaded.installed[0].id, "snake-plus");
         Ok(())
     }
 }

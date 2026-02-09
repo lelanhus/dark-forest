@@ -38,6 +38,12 @@ pub struct GameStatsSummary {
     pub last_played_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InstalledSummary {
+    pub current_version: String,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameItem {
     pub id: String,
@@ -82,6 +88,7 @@ pub struct RenderContext {
     pub runner_fullscreen: bool,
     pub perf_summary: String,
     pub game_stats: BTreeMap<String, GameStatsSummary>,
+    pub installed: BTreeMap<String, InstalledSummary>,
 }
 
 impl Default for RenderContext {
@@ -93,6 +100,7 @@ impl Default for RenderContext {
             runner_fullscreen: false,
             perf_summary: "fps:auto".to_string(),
             game_stats: BTreeMap::new(),
+            installed: BTreeMap::new(),
         }
     }
 }
@@ -383,7 +391,7 @@ pub fn render(frame: &mut ratatui::Frame<'_>, state: &ShellState, context: &Rend
     match &state.route {
         Route::Home => render_home(frame, body, state, context),
         Route::Library => render_library(frame, body, state, "Library"),
-        Route::Installed => render_library(frame, body, state, "Installed"),
+        Route::Installed => render_installed(frame, body, state, context),
         Route::Settings => render_settings(frame, body, state),
         Route::GameDetail { id } => render_detail(frame, body, state, context, id),
         Route::Runner => render_runner(frame, body, context),
@@ -592,6 +600,92 @@ fn render_library(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState
     );
 }
 
+fn render_installed(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &ShellState,
+    context: &RenderContext,
+) {
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let installed_ids = state
+        .games
+        .iter()
+        .filter(|game| context.installed.contains_key(&game.id))
+        .map(|game| game.id.clone())
+        .collect::<Vec<_>>();
+
+    let list_items = installed_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, game_id)| {
+            let name = state
+                .games
+                .iter()
+                .find(|game| game.id == *game_id)
+                .map_or_else(|| game_id.clone(), |game| game.name.clone());
+
+            let style = if idx == state.list_index {
+                selected_style()
+            } else {
+                Style::default().fg(FORGE.fg)
+            };
+            ListItem::new(Line::from(Span::styled(name, style)))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        List::new(list_items)
+            .block(
+                Block::default()
+                    .title("Installed")
+                    .borders(Borders::ALL)
+                    .style(panel_style()),
+            )
+            .highlight_style(selected_style()),
+        main[0],
+    );
+
+    let selected_id = installed_ids.get(state.list_index);
+    let detail = selected_id.map_or_else(
+        || "No installed game selected".to_string(),
+        |id| {
+            let game = state.games.iter().find(|item| item.id == *id);
+            let installed = context.installed.get(id).cloned().unwrap_or_default();
+            format!(
+                "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- Verify (planned)\n- Rollback (planned)\n- Update (planned)\n\nPress Enter for game detail.",
+                game.map_or_else(|| id.clone(), |item| item.name.clone()),
+                game.map_or_else(|| "No metadata available".to_string(), |item| item.description.clone()),
+                if installed.current_version.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    installed.current_version
+                },
+                if installed.source.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    installed.source
+                },
+            )
+        },
+    );
+
+    frame.render_widget(
+        Paragraph::new(detail)
+            .block(
+                Block::default()
+                    .title("Installed Detail")
+                    .borders(Borders::ALL)
+                    .style(panel_style()),
+            )
+            .wrap(Wrap { trim: true }),
+        main[1],
+    );
+}
+
 fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState) {
     let content = vec![
         Line::from(Span::styled("Settings", title_style())),
@@ -629,14 +723,21 @@ fn render_detail(
         .best_score
         .map_or_else(|| "n/a".to_string(), |value| value.to_string());
     let last_played = stats.last_played_at.unwrap_or_else(|| "never".to_string());
+    let installed = context.installed.get(id).cloned().unwrap_or_default();
+    let version = if installed.current_version.is_empty() {
+        "unknown".to_string()
+    } else {
+        installed.current_version
+    };
 
     let text = selected.map_or_else(
         || format!("Unknown game: {id}"),
         |game| {
             format!(
-                "{}\n\n{}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nPress Enter to start. Esc to go back.",
+                "{}\n\n{}\n\nVersion: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nPress Enter to start. Esc to go back.",
                 game.name,
                 game.description,
+                version,
                 stats.play_count,
                 best_score,
                 last_played
@@ -918,7 +1019,8 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::{
-        GameItem, GameStatsSummary, Overlay, RenderContext, Route, ShellCommand, ShellState, render,
+        GameItem, GameStatsSummary, InstalledSummary, Overlay, RenderContext, Route, ShellCommand,
+        ShellState, render,
     };
 
     #[test]
@@ -1107,6 +1209,33 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         assert_buffer_contains(&buffer, "Best score");
         assert_buffer_contains(&buffer, "420");
+        Ok(())
+    }
+
+    #[test]
+    fn installed_route_renders_version_and_actions() -> std::io::Result<()> {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Installed;
+        state.list_index = 0;
+
+        let mut context = RenderContext::default();
+        context.installed.insert(
+            "snake-plus".to_string(),
+            InstalledSummary {
+                current_version: "0.1.0".to_string(),
+                source: "builtin://dark-forest".to_string(),
+            },
+        );
+
+        terminal.draw(|frame| {
+            render(frame, &state, &context);
+        })?;
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_buffer_contains(&buffer, "Version:");
+        assert_buffer_contains(&buffer, "Verify");
         Ok(())
     }
 }
