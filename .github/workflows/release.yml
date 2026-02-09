@@ -1,0 +1,143 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-artifacts:
+    name: build-${{ matrix.artifact_target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_target: linux-x86_64
+            binary_ext: ""
+            archive_ext: tar.gz
+            smoke: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_target: linux-aarch64
+            binary_ext: ""
+            archive_ext: tar.gz
+            smoke: false
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_target: macos-arm64
+            binary_ext: ""
+            archive_ext: tar.gz
+            smoke: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_target: windows-x86_64
+            binary_ext: ".exe"
+            archive_ext: zip
+            smoke: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Resolve artifact names
+        id: meta
+        shell: bash
+        run: |
+          binary="dark-forest${{ matrix.binary_ext }}"
+          archive="dark-forest-${{ github.ref_name }}-${{ matrix.artifact_target }}.${{ matrix.archive_ext }}"
+          echo "binary=${binary}" >> "$GITHUB_OUTPUT"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary (native targets)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --release -p dark-forest --target "${{ matrix.target }}"
+
+      - name: Build release binary (linux aarch64 cross)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release -p dark-forest --target "${{ matrix.target }}"
+
+      - name: Replay smoke test (Unix)
+        if: matrix.smoke && matrix.os != 'windows-latest'
+        run: |
+          ./target/${{ matrix.target }}/release/${{ steps.meta.outputs.binary }} \
+            --replay fixtures/replays/snake-seed-12345.json
+
+      - name: Replay smoke test (Windows)
+        if: matrix.smoke && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          .\target\${{ matrix.target }}\release\${{ steps.meta.outputs.binary }} --replay fixtures/replays/snake-seed-12345.json
+
+      - name: Package artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p release/pkg
+          cp "target/${{ matrix.target }}/release/${{ steps.meta.outputs.binary }}" release/pkg/
+          cp LICENSE-APACHE LICENSE-MIT README.md release/pkg/
+          tar -C release/pkg -czf "release/${{ steps.meta.outputs.archive }}" .
+
+      - name: Package artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release\pkg -Force | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ steps.meta.outputs.binary }}" release\pkg\
+          Copy-Item LICENSE-APACHE, LICENSE-MIT, README.md release\pkg\
+          Compress-Archive -Path release\pkg\* -DestinationPath ("release\" + "${{ steps.meta.outputs.archive }}") -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_target }}
+          path: release/${{ steps.meta.outputs.archive }}
+          if-no-files-found: error
+
+  publish-release:
+    name: publish-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-artifacts]
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          shasum -a 256 * > SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
