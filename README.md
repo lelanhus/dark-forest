@@ -2,86 +2,91 @@
 
 Dark Forest is a terminal-native arcade console written in Rust.
 
-The mission is to ship a terminal experience that feels like a GUI: fast, beautiful, extensible, and safe by default, including on Raspberry Pi-class hardware.
+The mission is to deliver a terminal experience that feels like a GUI: fast, beautiful, extensible, and safe by default, including on Raspberry Pi-class hardware.
 
-## Project Status
+## Status
 
-Pre-implementation planning baseline.
+Dark Forest is at first release scope (`v0.1.0`).
 
-- Product specification is defined in `SPEC.md`.
-- Engineering and contributor workflows are documented in this repository.
-- Runtime and feature code has not started yet.
+Implemented in `v0.1.0`:
 
-## Project Principles
+- Shell routes: Home, Library, Installed, Settings, Game Detail, Runner.
+- Global overlays: command palette (`Ctrl+K`), contextual search (`/`), help (`?`), notifications, progress, and error detail.
+- Runtime contracts: fixed-timestep event loop, framebuffer model, diff rendering, pane/fullscreen runner, auto 30/60 policy.
+- Built-in games: Snake+, Tetris-like, Micro Roguelite.
+- Local persistence under `~/.dark-forest/` for settings, play history, installed records, and high scores.
+- Replay harness and headless replay execution mode.
 
-- Safety before convenience.
-- Deterministic behavior over hidden magic.
-- Declarative design over imperative sprawl.
-- Convention over configuration.
-- No UI stalls on blocking I/O.
-- No flicker in terminal rendering.
+## Running
+
+Interactive shell:
+
+```bash
+cargo run -p dark-forest
+```
+
+Headless replay mode:
+
+```bash
+cargo run -p dark-forest -- --replay fixtures/replays/snake-seed-12345.json
+```
+
+## Release Artifacts (v0.1.0)
+
+Tag-driven release builds publish:
+
+- `dark-forest-v0.1.0-linux-x86_64.tar.gz`
+- `dark-forest-v0.1.0-linux-aarch64.tar.gz`
+- `dark-forest-v0.1.0-macos-arm64.tar.gz`
+- `dark-forest-v0.1.0-windows-x86_64.zip`
+- `SHA256SUMS.txt`
 
 ## Architecture At A Glance
 
-Planned top-level areas:
+- `crates/shell`: routes, overlays, layout rendering, keymaps.
+- `crates/runtime`: game contracts, event dispatch, timing, diff renderer, replay engine.
+- `crates/games`: built-in native games.
+- `crates/content`: JSON persistence and atomic writes.
+- `crates/registry`: listing/resolution interfaces (builtin provider active in v0.1).
+- `crates/plugin-host`: entry types and capability model scaffolding.
+- `crates/theme`: Forge theme tokens and style helpers.
+- `crates/diagnostics`: terminal and render diagnostics.
 
-- Shell UI (`home`, `library`, `installed`, `settings`).
-- Runtime engine (input, timing, framebuffer, diff renderer).
-- Content system (install, update, verify, rollback).
-- Registry system (builtin, local, and remote providers).
-- Plugin execution (trusted native, sandboxed WASM, guarded process mode).
+## Quality Standards
 
-Detailed architecture contract: `ARCHITECTURE.md`.
+Required local quality gates:
 
-Local host-managed data root: `~/.dark-forest/`.
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+```
 
-## Target Platforms
+Additional policy and standards docs:
 
-- Linux (`x86_64`, `aarch64`) with Pi-class devices as a priority.
-- macOS.
-- Windows.
+- `ENGINEERING_STANDARDS.md`
+- `TESTING.md`
+- `LINTING.md`
+- `DEPENDENCY_POLICY.md`
 
-## Quality Bar
+## Contributing
 
-All changes are expected to follow:
-
-- Mandatory TDD workflow: see `TESTING.md`.
-- Strict lint and docs checks: see `LINTING.md`.
-- Adapted NASA-style mission-critical standards: see `ENGINEERING_STANDARDS.md`.
-- Dependency allowlist and review gate: see `DEPENDENCY_POLICY.md`.
-
-Local quality command:
-
-- `make ci` (runs docs checks and Rust checks; Rust checks auto-skip until workspace exists)
-
-## Contributing Quickstart
-
-1. Read `CONTRIBUTING.md`, `ENGINEERING_STANDARDS.md`, and `TESTING.md`.
-2. Create a short-lived branch from `main`.
-3. Write a failing test that proves the required behavior.
-4. Implement the minimum change needed to pass tests.
-5. Run required local checks.
-6. Open a PR with evidence and a `Signed-off-by` line (DCO).
+See `CONTRIBUTING.md` for TDD-first workflow, Conventional Commits, and DCO requirements.
 
 ## Security
 
-Do not report vulnerabilities in public issues.
-
-Use GitHub Security Advisories for private disclosure as defined in `SECURITY.md`.
+Do not disclose vulnerabilities in public issues. Use GitHub Security Advisories as defined in `SECURITY.md`.
 
 ## Roadmap
 
-Milestone-based roadmap: `ROADMAP.md`.
-
-## Governance
-
-Project decision model and escalation path: `GOVERNANCE.md`.
+Milestone plan and release lifecycle: `ROADMAP.md`.
 
 ## License
 
-Dual-licensed under:
+Dual-licensed under either:
 
 - Apache License 2.0 (`LICENSE-APACHE`)
-- MIT License (`LICENSE-MIT`)
+- MIT (`LICENSE-MIT`)
 
-At your option.
+at your option.

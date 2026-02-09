@@ -49,6 +49,7 @@ pub struct GameItem {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,9 +65,12 @@ pub struct ShellState {
     pub settings_index: usize,
     pub performance_mode: String,
     pub continue_game_id: Option<String>,
+    pub command_palette_index: usize,
+    pub search_query: String,
+    pub installed_game_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellCommand {
     Quit,
     OpenRoute(Route),
@@ -79,6 +83,59 @@ pub enum ShellCommand {
     CyclePerformance,
     None,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteAction {
+    OpenHome,
+    OpenLibrary,
+    OpenInstalled,
+    OpenSettings,
+    StartSelectedGame,
+    TogglePerformance,
+    OpenDiagnostics,
+    OpenHelp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaletteCommand {
+    label: &'static str,
+    action: PaletteAction,
+}
+
+const PALETTE_COMMANDS: [PaletteCommand; 8] = [
+    PaletteCommand {
+        label: "Open Home",
+        action: PaletteAction::OpenHome,
+    },
+    PaletteCommand {
+        label: "Open Library",
+        action: PaletteAction::OpenLibrary,
+    },
+    PaletteCommand {
+        label: "Open Installed",
+        action: PaletteAction::OpenInstalled,
+    },
+    PaletteCommand {
+        label: "Open Settings",
+        action: PaletteAction::OpenSettings,
+    },
+    PaletteCommand {
+        label: "Start Selected Game",
+        action: PaletteAction::StartSelectedGame,
+    },
+    PaletteCommand {
+        label: "Toggle Performance Mode",
+        action: PaletteAction::TogglePerformance,
+    },
+    PaletteCommand {
+        label: "Open Diagnostics",
+        action: PaletteAction::OpenDiagnostics,
+    },
+    PaletteCommand {
+        label: "Open Help",
+        action: PaletteAction::OpenHelp,
+    },
+];
 
 #[derive(Debug, Clone)]
 pub struct RenderContext {
@@ -120,6 +177,9 @@ impl ShellState {
             settings_index: 0,
             performance_mode: "auto".to_string(),
             continue_game_id: None,
+            command_palette_index: 0,
+            search_query: String::new(),
+            installed_game_ids: Vec::new(),
         }
     }
 
@@ -133,6 +193,133 @@ impl ShellState {
     pub fn set_error(&mut self, err: impl Into<String>) {
         self.last_error = Some(err.into());
         self.overlay = Some(Overlay::ErrorDetail);
+    }
+
+    pub fn set_installed_game_ids(&mut self, ids: Vec<String>) {
+        self.installed_game_ids = ids;
+        self.normalize_list_index();
+    }
+
+    fn normalize_list_index(&mut self) {
+        let visible_len = self.visible_game_indices_for_route(&self.route).len();
+        if visible_len == 0 {
+            self.list_index = 0;
+            return;
+        }
+
+        if self.list_index >= visible_len {
+            self.list_index = visible_len - 1;
+        }
+    }
+
+    fn query(&self) -> String {
+        self.search_query.trim().to_lowercase()
+    }
+
+    fn game_matches_query(&self, game: &GameItem) -> bool {
+        let query = self.query();
+        if query.is_empty() {
+            return true;
+        }
+
+        game.id.to_lowercase().contains(&query)
+            || game.name.to_lowercase().contains(&query)
+            || game.description.to_lowercase().contains(&query)
+            || game
+                .tags
+                .iter()
+                .any(|tag| tag.to_lowercase().contains(&query))
+    }
+
+    fn filtered_game_indices(&self) -> Vec<usize> {
+        self.games
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, game)| self.game_matches_query(game).then_some(idx))
+            .collect()
+    }
+
+    fn visible_game_indices_for_route(&self, route: &Route) -> Vec<usize> {
+        let filtered = self.filtered_game_indices();
+        if matches!(route, Route::Installed) {
+            return filtered
+                .into_iter()
+                .filter(|idx| {
+                    self.installed_game_ids
+                        .iter()
+                        .any(|id| id == &self.games[*idx].id)
+                })
+                .collect();
+        }
+
+        filtered
+    }
+
+    fn selected_game_for_route(&self, route: &Route) -> Option<&GameItem> {
+        let visible = self.visible_game_indices_for_route(route);
+        if visible.is_empty() {
+            return None;
+        }
+
+        let selected = self.list_index.min(visible.len() - 1);
+        self.games.get(visible[selected])
+    }
+
+    fn selected_start_target(&self) -> Option<String> {
+        match &self.route {
+            Route::GameDetail { id } => Some(id.clone()),
+            Route::Library => self
+                .selected_game_for_route(&Route::Library)
+                .map(|game| game.id.clone()),
+            Route::Installed => self
+                .selected_game_for_route(&Route::Installed)
+                .map(|game| game.id.clone()),
+            _ => self
+                .continue_game_id
+                .clone()
+                .or_else(|| self.games.first().map(|game| game.id.clone())),
+        }
+    }
+
+    fn execute_palette_action(&self, action: PaletteAction) -> Vec<ShellCommand> {
+        match action {
+            PaletteAction::OpenHome => vec![
+                ShellCommand::OpenRoute(Route::Home),
+                ShellCommand::SetOverlay(None),
+            ],
+            PaletteAction::OpenLibrary => vec![
+                ShellCommand::OpenRoute(Route::Library),
+                ShellCommand::SetOverlay(None),
+            ],
+            PaletteAction::OpenInstalled => vec![
+                ShellCommand::OpenRoute(Route::Installed),
+                ShellCommand::SetOverlay(None),
+            ],
+            PaletteAction::OpenSettings => vec![
+                ShellCommand::OpenRoute(Route::Settings),
+                ShellCommand::SetOverlay(None),
+            ],
+            PaletteAction::StartSelectedGame => {
+                if let Some(id) = self.selected_start_target() {
+                    vec![ShellCommand::StartGame(id), ShellCommand::SetOverlay(None)]
+                } else {
+                    vec![ShellCommand::SetOverlay(None)]
+                }
+            }
+            PaletteAction::TogglePerformance => {
+                vec![
+                    ShellCommand::CyclePerformance,
+                    ShellCommand::SetOverlay(None),
+                ]
+            }
+            PaletteAction::OpenDiagnostics => vec![
+                ShellCommand::OpenRoute(Route::Settings),
+                ShellCommand::SetOverlay(None),
+            ],
+            PaletteAction::OpenHelp => {
+                vec![ShellCommand::SetOverlay(Some(Overlay::Help))]
+            }
+        }
     }
 
     pub fn handle_key(
@@ -149,6 +336,7 @@ impl ShellState {
             match key.code {
                 KeyCode::Char('q') => return vec![ShellCommand::Quit],
                 KeyCode::Char('k') => {
+                    self.command_palette_index = 0;
                     return vec![ShellCommand::SetOverlay(Some(Overlay::CommandPalette))];
                 }
                 _ => {}
@@ -156,7 +344,11 @@ impl ShellState {
         }
 
         match key.code {
-            KeyCode::Char('/') => vec![ShellCommand::SetOverlay(Some(Overlay::Search))],
+            KeyCode::Char('/') => {
+                self.search_query.clear();
+                self.list_index = 0;
+                vec![ShellCommand::SetOverlay(Some(Overlay::Search))]
+            }
             KeyCode::Char('?') => vec![ShellCommand::SetOverlay(Some(Overlay::Help))],
             _ => self.handle_route_key(key, has_running_game, runner_paused),
         }
@@ -170,6 +362,45 @@ impl ShellState {
         runner_paused: bool,
     ) -> Vec<ShellCommand> {
         match overlay {
+            Overlay::CommandPalette => match key.code {
+                KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = PALETTE_COMMANDS.len().max(1);
+                    self.command_palette_index = (self.command_palette_index + 1) % len;
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let len = PALETTE_COMMANDS.len().max(1);
+                    self.command_palette_index = (self.command_palette_index + len - 1) % len;
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Enter => {
+                    let selected = self.command_palette_index.min(PALETTE_COMMANDS.len() - 1);
+                    self.execute_palette_action(PALETTE_COMMANDS[selected].action)
+                }
+                _ => vec![ShellCommand::None],
+            },
+            Overlay::Search => match key.code {
+                KeyCode::Esc => {
+                    self.search_query.clear();
+                    self.list_index = 0;
+                    vec![ShellCommand::SetOverlay(None)]
+                }
+                KeyCode::Enter => vec![ShellCommand::SetOverlay(None)],
+                KeyCode::Backspace => {
+                    let _ = self.search_query.pop();
+                    self.list_index = 0;
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Char(ch) => {
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                        self.search_query.push(ch);
+                        self.list_index = 0;
+                    }
+                    vec![ShellCommand::None]
+                }
+                _ => vec![ShellCommand::None],
+            },
             Overlay::RunnerPauseMenu => {
                 if !has_running_game {
                     return vec![ShellCommand::SetOverlay(None)];
@@ -255,7 +486,8 @@ impl ShellState {
     ) -> Vec<ShellCommand> {
         match self.route.clone() {
             Route::Home => self.handle_home_key(key),
-            Route::Library | Route::Installed => self.handle_library_key(key),
+            Route::Library => self.handle_collection_key(key, Route::Library),
+            Route::Installed => self.handle_collection_key(key, Route::Installed),
             Route::Settings => self.handle_settings_key(key),
             Route::GameDetail { id } => self.handle_detail_key(key, id),
             Route::Runner => self.handle_runner_key(key, has_running_game, runner_paused),
@@ -289,8 +521,10 @@ impl ShellState {
         }
     }
 
-    fn handle_library_key(&mut self, key: KeyEvent) -> Vec<ShellCommand> {
-        let len = self.games.len().max(1);
+    fn handle_collection_key(&mut self, key: KeyEvent, route: Route) -> Vec<ShellCommand> {
+        self.normalize_list_index();
+        let visible = self.visible_game_indices_for_route(&route);
+        let len = visible.len().max(1);
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.list_index = (self.list_index + 1) % len;
@@ -302,7 +536,10 @@ impl ShellState {
             }
             KeyCode::Esc => vec![ShellCommand::OpenRoute(Route::Home)],
             KeyCode::Enter => {
-                if let Some(game) = self.games.get(self.list_index) {
+                if let Some(game_idx) =
+                    visible.get(self.list_index.min(visible.len().saturating_sub(1)))
+                    && let Some(game) = self.games.get(*game_idx)
+                {
                     vec![ShellCommand::OpenRoute(Route::GameDetail {
                         id: game.id.clone(),
                     })]
@@ -367,7 +604,14 @@ impl ShellState {
     }
 
     pub fn selected_game(&self) -> Option<&GameItem> {
-        self.games.get(self.list_index)
+        self.selected_game_for_route(&self.route)
+    }
+
+    pub fn visible_games_for_route(&self, route: &Route) -> Vec<&GameItem> {
+        self.visible_game_indices_for_route(route)
+            .into_iter()
+            .filter_map(|idx| self.games.get(idx))
+            .collect()
     }
 }
 
@@ -390,7 +634,7 @@ pub fn render(frame: &mut ratatui::Frame<'_>, state: &ShellState, context: &Rend
 
     match &state.route {
         Route::Home => render_home(frame, body, state, context),
-        Route::Library => render_library(frame, body, state, "Library"),
+        Route::Library => render_library(frame, body, state, Route::Library, "Library"),
         Route::Installed => render_installed(frame, body, state, context),
         Route::Settings => render_settings(frame, body, state),
         Route::GameDetail { id } => render_detail(frame, body, state, context, id),
@@ -553,23 +797,35 @@ fn home_detail_lines(state: &ShellState, context: &RenderContext) -> Vec<Line<'s
     }
 }
 
-fn render_library(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState, title: &str) {
+fn render_library(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &ShellState,
+    route: Route,
+    title: &str,
+) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    let list_items = state
-        .games
+    let visible_games = state.visible_games_for_route(&route);
+    let selected = if visible_games.is_empty() {
+        0
+    } else {
+        state.list_index.min(visible_games.len() - 1)
+    };
+
+    let list_items = visible_games
         .iter()
         .enumerate()
         .map(|(idx, game)| {
-            let style = if idx == state.list_index {
+            let style = if idx == selected {
                 selected_style()
             } else {
                 Style::default().fg(FORGE.fg)
             };
-            ListItem::new(Line::from(Span::styled(game.name.clone(), style)))
+            ListItem::new(Line::from(Span::styled(game.name.to_string(), style)))
         })
         .collect::<Vec<_>>();
 
@@ -583,7 +839,7 @@ fn render_library(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState
         .highlight_style(selected_style());
     frame.render_widget(left, main[0]);
 
-    let detail = state.selected_game().map_or_else(
+    let detail = visible_games.get(selected).map_or_else(
         || "No game selected".to_string(),
         |g| format!("{}\n\n{}\n\nPress Enter for detail.", g.name, g.description),
     );
@@ -611,29 +867,29 @@ fn render_installed(
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    let installed_ids = state
-        .games
+    let installed_games = state
+        .visible_games_for_route(&Route::Installed)
         .iter()
         .filter(|game| context.installed.contains_key(&game.id))
-        .map(|game| game.id.clone())
+        .copied()
         .collect::<Vec<_>>();
 
-    let list_items = installed_ids
+    let selected = if installed_games.is_empty() {
+        0
+    } else {
+        state.list_index.min(installed_games.len() - 1)
+    };
+
+    let list_items = installed_games
         .iter()
         .enumerate()
-        .map(|(idx, game_id)| {
-            let name = state
-                .games
-                .iter()
-                .find(|game| game.id == *game_id)
-                .map_or_else(|| game_id.clone(), |game| game.name.clone());
-
-            let style = if idx == state.list_index {
+        .map(|(idx, game)| {
+            let style = if idx == selected {
                 selected_style()
             } else {
                 Style::default().fg(FORGE.fg)
             };
-            ListItem::new(Line::from(Span::styled(name, style)))
+            ListItem::new(Line::from(Span::styled(game.name.clone(), style)))
         })
         .collect::<Vec<_>>();
 
@@ -649,16 +905,14 @@ fn render_installed(
         main[0],
     );
 
-    let selected_id = installed_ids.get(state.list_index);
-    let detail = selected_id.map_or_else(
+    let detail = installed_games.get(selected).map_or_else(
         || "No installed game selected".to_string(),
-        |id| {
-            let game = state.games.iter().find(|item| item.id == *id);
-            let installed = context.installed.get(id).cloned().unwrap_or_default();
+        |game| {
+            let installed = context.installed.get(&game.id).cloned().unwrap_or_default();
             format!(
                 "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- Verify (planned)\n- Rollback (planned)\n- Update (planned)\n\nPress Enter for game detail.",
-                game.map_or_else(|| id.clone(), |item| item.name.clone()),
-                game.map_or_else(|| "No metadata available".to_string(), |item| item.description.clone()),
+                game.name,
+                game.description,
                 if installed.current_version.is_empty() {
                     "unknown".to_string()
                 } else {
@@ -889,11 +1143,8 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
     frame.render_widget(Clear, popup);
 
     let (title, body) = match overlay {
-        Overlay::CommandPalette => (
-            "Command Palette",
-            "Commands are coming online. Esc to close.".to_string(),
-        ),
-        Overlay::Search => ("Search", "Search is contextual. Esc to close.".to_string()),
+        Overlay::CommandPalette => ("Command Palette", command_palette_body(state)),
+        Overlay::Search => ("Search", search_overlay_body(state)),
         Overlay::Help => (
             "Help",
             "Global: ↑/↓ or j/k, Enter, Esc, /, Ctrl+K, ?, Ctrl+Q\nRunner: P, R, F, Esc"
@@ -947,6 +1198,43 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
             .wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+fn command_palette_body(state: &ShellState) -> String {
+    let mut lines = vec!["Select a command:".to_string(), String::new()];
+
+    let selected = state.command_palette_index.min(PALETTE_COMMANDS.len() - 1);
+    for (idx, command) in PALETTE_COMMANDS.iter().enumerate() {
+        let marker = if idx == selected { ">" } else { " " };
+        lines.push(format!("{marker} {}", command.label));
+    }
+
+    lines.push(String::new());
+    lines.push("Enter executes. Esc closes.".to_string());
+    lines.join("\n")
+}
+
+fn search_overlay_body(state: &ShellState) -> String {
+    let route = if matches!(state.route, Route::Installed) {
+        Route::Installed
+    } else {
+        Route::Library
+    };
+    let matches = state.visible_game_indices_for_route(&route).len();
+    let route_label = if matches!(route, Route::Installed) {
+        "Installed"
+    } else {
+        "Library"
+    };
+
+    format!(
+        "Route: {route_label}\nQuery: {}\nMatches: {matches}\n\nType to filter by id, name, description, or tags.\nBackspace deletes. Esc clears and closes.",
+        if state.search_query.is_empty() {
+            "<empty>"
+        } else {
+            &state.search_query
+        }
+    )
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1107,11 +1395,17 @@ mod tests {
                 id: "snake-plus".to_string(),
                 name: "Snake+".to_string(),
                 description: "Arcade loop".to_string(),
+                tags: vec!["arcade".to_string(), "builtin".to_string()],
             },
             GameItem {
                 id: "tetris-like".to_string(),
                 name: "Tetris-like".to_string(),
                 description: "Timing game".to_string(),
+                tags: vec![
+                    "arcade".to_string(),
+                    "puzzle".to_string(),
+                    "builtin".to_string(),
+                ],
             },
         ]
     }
@@ -1219,6 +1513,7 @@ mod tests {
         let mut state = ShellState::new(sample_games());
         state.route = Route::Installed;
         state.list_index = 0;
+        state.set_installed_game_ids(vec!["snake-plus".to_string()]);
 
         let mut context = RenderContext::default();
         context.installed.insert(
@@ -1237,5 +1532,121 @@ mod tests {
         assert_buffer_contains(&buffer, "Version:");
         assert_buffer_contains(&buffer, "Verify");
         Ok(())
+    }
+
+    #[test]
+    fn command_palette_executes_route_command() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Settings;
+        state.overlay = Some(Overlay::CommandPalette);
+
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            commands,
+            vec![
+                ShellCommand::OpenRoute(Route::Library),
+                ShellCommand::SetOverlay(None),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_query_filters_list_and_restores_on_close() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Library;
+        state.overlay = Some(Overlay::Search);
+
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        let filtered = state.visible_games_for_route(&Route::Library);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "tetris-like");
+
+        let close = state.handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(close, vec![ShellCommand::SetOverlay(None)]);
+        assert!(state.search_query.is_empty());
+
+        let restored = state.visible_games_for_route(&Route::Library);
+        assert_eq!(restored.len(), 2);
+    }
+
+    #[test]
+    fn installed_search_filters_by_tags() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Installed;
+        state.overlay = Some(Overlay::Search);
+        state.set_installed_game_ids(vec!["snake-plus".to_string(), "tetris-like".to_string()]);
+
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        let _ = state.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        let filtered = state.visible_games_for_route(&Route::Installed);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "tetris-like");
+    }
+
+    #[test]
+    fn runner_modal_overlay_consumes_keys() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        state.overlay = Some(Overlay::RunnerQuitConfirm);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
+            true,
+            false,
+        );
+        assert_eq!(commands, vec![ShellCommand::None]);
     }
 }

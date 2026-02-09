@@ -11,94 +11,62 @@ Source of product scope: `SPEC.md`.
 - Critical security or reliability regressions block release.
 - Changes to milestone scope require maintainer approval.
 
-## M0 - Foundation
+## Milestone Status Snapshot
+
+- M0 Foundation: Complete
+- M1 Shell Skeleton: Complete
+- M2 Runtime v0: Complete
+- M3 Built-in Native Games (`v0.1.0`): Complete
+- M4+ : Pending
+
+## M0 - Foundation (Complete)
 
 Objective: establish repository, policies, documentation, and CI gate contracts.
 
-Entry criteria:
-
-- `SPEC.md` approved.
-- Governance and contributor policies approved.
-
-Exit criteria:
+Exit criteria met:
 
 - Documentation baseline complete.
 - Quality gates defined and enforceable.
 - ADR process active.
 
-Dependencies:
-
-- None.
-
-## M1 - Shell Skeleton
+## M1 - Shell Skeleton (Complete)
 
 Objective: route and overlay skeleton with Forge theme rules.
 
-Entry criteria:
-
-- M0 complete.
-- Architecture boundaries approved.
-
-Exit criteria:
+Exit criteria met:
 
 - Home/Library/Installed/Settings navigation functional.
-- Global overlays available (`Ctrl+K`, `/`, `?`, notifications, progress drawer).
-- No full-screen flicker under normal interaction.
+- Global overlays available (`Ctrl+K`, `/`, `?`, notifications, progress, error detail).
+- Keyboard-first flow stable with snapshot coverage.
 
-Dependencies:
-
-- M0.
-
-## M2 - Runtime v0
+## M2 - Runtime v0 (Complete)
 
 Objective: stable runtime contracts and renderer behavior.
 
-Entry criteria:
-
-- M1 complete.
-- Runtime interface ADR approved.
-
-Exit criteria:
+Exit criteria met:
 
 - Runtime state-machine contract implemented.
-- Framebuffer and mandatory diff renderer in place.
+- Framebuffer and diff renderer in place.
 - Pane/fullscreen modes functional.
 - Auto 30/60 policy implemented with hysteresis.
-- Minimal replay harness operational.
+- Replay harness operational.
 
-Dependencies:
-
-- M1.
-
-## M3 - Built-in Native Games (v0.1)
+## M3 - Built-in Native Games (Complete, `v0.1.0`)
 
 Objective: ship initial quality bar titles.
 
-Entry criteria:
-
-- M2 complete.
-
-Exit criteria:
+Exit criteria met:
 
 - `Snake+`, `Tetris-like`, and `Micro Roguelite` shipped.
 - Shared pause/restart/quit UX across games.
 - Local high scores and play stats implemented.
-- Cross-platform binaries produced in CI.
+- Cross-platform release artifact workflow defined for first release matrix.
 
-Dependencies:
-
-- M2.
-
-## M4 - Local Installs and Hot-load (v0.2)
+## M4 - Local Installs and Hot-load (v0.2, Pending)
 
 Objective: content management for local artifacts.
 
-Entry criteria:
-
-- M3 complete.
-- Content install/rollback ADR approved.
-
-Exit criteria:
+Planned exit criteria:
 
 - Local provider supports install/update/remove.
 - Atomic `current` pointer flips verified.
@@ -109,18 +77,13 @@ Dependencies:
 
 - M2, M3.
 
-## M5 - First Remote Registry Provider (v0.3)
+## M5 - First Remote Registry Provider (v0.3, Pending)
 
 Objective: remote source ingestion with cache/recovery behavior.
 
-Entry criteria:
+Planned exit criteria:
 
-- M4 complete.
-- Registry abstraction stable.
-
-Exit criteria:
-
-- At least one remote provider (`index://` or `github://`) implemented.
+- At least one remote provider (`index://` preferred) implemented.
 - Catalog/artifact caching and retry/recovery behavior documented and tested.
 - Registry errors surfaced without UI lockup.
 
@@ -128,16 +91,11 @@ Dependencies:
 
 - M4.
 
-## M6 - Permission Enforcement and WASM Plugins (v1.0)
+## M6 - Permission Enforcement and WASM Plugins (v1.0, Pending)
 
 Objective: enforce trust boundaries for third-party games.
 
-Entry criteria:
-
-- M5 complete.
-- Security enforcement ADRs approved.
-
-Exit criteria:
+Planned exit criteria:
 
 - WASM third-party plugin execution supported.
 - Capability grants enforced and revocable.
@@ -148,15 +106,11 @@ Dependencies:
 
 - M5.
 
-## M7 - Creator Tooling (v1.1+)
+## M7 - Creator Tooling (v1.1+, Pending)
 
 Objective: accelerate ecosystem growth safely.
 
-Entry criteria:
-
-- M6 complete.
-
-Exit criteria:
+Planned exit criteria:
 
 - `dev`, `pack`, `publish`, `verify` workflows defined and usable.
 - Templates and hot-reload creator path documented.
@@ -166,15 +120,11 @@ Dependencies:
 
 - M6.
 
-## M8 - Marketplace Maturity (v2.0+)
+## M8 - Marketplace Maturity (v2.0+, Pending)
 
 Objective: high-trust multi-source marketplace.
 
-Entry criteria:
-
-- M7 complete.
-
-Exit criteria:
+Planned exit criteria:
 
 - Multi-registry support is stable.
 - Verified publisher and signature workflows in place.
@@ -185,15 +135,11 @@ Dependencies:
 
 - M7.
 
-## M9 - Console OS Maturity (v3.0+)
+## M9 - Console OS Maturity (v3.0+, Pending)
 
 Objective: long-horizon platform features.
 
-Entry criteria:
-
-- M8 complete.
-
-Exit criteria:
+Planned exit criteria:
 
 - Profile support complete.
 - Optional kid mode design finalized and shipped if accepted.

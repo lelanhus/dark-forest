@@ -55,6 +55,18 @@ fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) 
     now.duration_since(last_render_at) >= target
 }
 
+fn should_forward_key_to_runner(
+    commands: &[ShellCommand],
+    route: &Route,
+    overlay: Option<shell::Overlay>,
+    runner_running: bool,
+) -> bool {
+    overlay.is_none()
+        && runner_running
+        && matches!(route, Route::Runner)
+        && commands.iter().all(|cmd| matches!(cmd, ShellCommand::None))
+}
+
 fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode> {
     let mut args = args.into_iter();
     let mut mode = LaunchMode::Interactive;
@@ -135,6 +147,7 @@ impl AppModel {
                 id: listing.id,
                 name: listing.name,
                 description: listing.description,
+                tags: listing.tags,
             })
             .collect::<Vec<_>>();
 
@@ -166,6 +179,13 @@ impl AppModel {
 
         let mut shell = ShellState::new(games);
         shell.continue_game_id = latest_played_game_id(&play_history);
+        shell.set_installed_game_ids(
+            installed
+                .installed
+                .iter()
+                .map(|item| item.id.clone())
+                .collect(),
+        );
 
         Ok(Self {
             shell,
@@ -303,7 +323,16 @@ impl AppModel {
             RunnerSignal::PerfModeChanged(mode) => {
                 self.shell.push_notification(format!("Perf mode: {mode:?}"))
             }
-            RunnerSignal::Crashed(err) => self.shell.set_error(format!("Game crashed: {err}")),
+            RunnerSignal::Crashed(err) => {
+                let crashed_id = self.current_game_id.clone();
+                self.current_game_id = None;
+                self.current_game_seed = None;
+                self.current_game_started_at = None;
+                self.shell.route = crashed_id
+                    .map(|id| Route::GameDetail { id })
+                    .unwrap_or(Route::Library);
+                self.shell.set_error(format!("Game crashed: {err}"));
+            }
         }
     }
 
@@ -497,10 +526,12 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                             model.runner.is_running(),
                             model.runner.is_paused(),
                         );
-                        let forwarded_to_runner =
-                            commands.iter().all(|cmd| matches!(cmd, ShellCommand::None))
-                                && matches!(model.shell.route, Route::Runner)
-                                && model.runner.is_running();
+                        let forwarded_to_runner = should_forward_key_to_runner(
+                            &commands,
+                            &model.shell.route,
+                            model.shell.overlay,
+                            model.runner.is_running(),
+                        );
 
                         for command in commands {
                             if model.handle_shell_command(command) {
@@ -564,7 +595,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use super::{LaunchMode, parse_launch_mode, should_render_frame};
+    use shell::{Overlay, Route, ShellCommand};
+
+    use super::{LaunchMode, parse_launch_mode, should_forward_key_to_runner, should_render_frame};
 
     #[test]
     fn render_scheduler_waits_until_target_duration() {
@@ -599,5 +632,27 @@ mod tests {
     fn rejects_unknown_launch_argument() {
         let error = parse_launch_mode(vec!["--nope".to_string()]);
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn overlay_blocks_runner_input_forwarding() {
+        let commands = vec![ShellCommand::None];
+        assert!(!should_forward_key_to_runner(
+            &commands,
+            &Route::Runner,
+            Some(Overlay::RunnerQuitConfirm),
+            true
+        ));
+    }
+
+    #[test]
+    fn unhandled_runner_key_without_overlay_is_forwarded() {
+        let commands = vec![ShellCommand::None];
+        assert!(should_forward_key_to_runner(
+            &commands,
+            &Route::Runner,
+            None,
+            true
+        ));
     }
 }

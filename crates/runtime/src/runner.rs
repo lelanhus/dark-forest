@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -47,6 +49,7 @@ pub struct RuntimeRunner {
     auto_perf: AutoPerfController,
     signals: VecDeque<RunnerSignal>,
     last_render_start: Instant,
+    crash_sequence: u64,
 }
 
 impl RuntimeRunner {
@@ -63,6 +66,7 @@ impl RuntimeRunner {
             auto_perf: AutoPerfController::default(),
             signals: VecDeque::new(),
             last_render_start: Instant::now(),
+            crash_sequence: 0,
         }
     }
 
@@ -89,6 +93,7 @@ impl RuntimeRunner {
         self.game = None;
         self.game_id = None;
         self.paused = false;
+        self.fullscreen = false;
         self.signals.push_back(RunnerSignal::Stopped);
     }
 
@@ -129,6 +134,27 @@ impl RuntimeRunner {
         let _ = self.dispatch(RuntimeEvent::Resize { w, h });
     }
 
+    fn crash_runner(&mut self, phase: &str, detail: String) {
+        self.crash_sequence = self.crash_sequence.saturating_add(1);
+        let crash_id = format!("runner-crash-{phase}-{:06}", self.crash_sequence);
+        tracing::error!(
+            crash_id = %crash_id,
+            phase = %phase,
+            game_id = ?self.game_id,
+            detail = %detail,
+            "runner crashed and recovered"
+        );
+
+        self.game = None;
+        self.game_id = None;
+        self.paused = false;
+        self.fullscreen = false;
+        self.frame.clear();
+        self.previous_frame.clear();
+        self.signals
+            .push_back(RunnerSignal::Crashed(format!("{crash_id}: {detail}")));
+    }
+
     pub fn dispatch(&mut self, event: RuntimeEvent) -> Result<()> {
         if self.game.is_none() {
             return Ok(());
@@ -139,24 +165,36 @@ impl RuntimeRunner {
         }
 
         let mut ctx = UpdateCtx::new(self.frame.width, self.frame.height);
-        if let Some(game) = self.game.as_mut()
-            && let Err(err) = game.update(event, &mut ctx)
-        {
-            self.signals
-                .push_back(RunnerSignal::Crashed(err.to_string()));
-            self.stop();
+        let update_result = if let Some(game) = self.game.as_mut() {
+            panic::catch_unwind(AssertUnwindSafe(|| game.update(event, &mut ctx)))
+        } else {
             return Ok(());
-        }
+        };
 
-        self.signals.extend(ctx.emitted_signals);
-        Ok(())
+        match update_result {
+            Ok(Ok(())) => {
+                self.signals.extend(ctx.emitted_signals);
+                Ok(())
+            }
+            Ok(Err(err)) => {
+                self.crash_runner("update", err.to_string());
+                Ok(())
+            }
+            Err(payload) => {
+                self.crash_runner("update", panic_payload_to_string(payload));
+                Ok(())
+            }
+        }
     }
 
     pub fn render(&mut self) -> FrameDelta {
         self.last_render_start = Instant::now();
         self.frame.clear();
         if let Some(game) = self.game.as_ref() {
-            game.render(&mut self.frame);
+            let result = panic::catch_unwind(AssertUnwindSafe(|| game.render(&mut self.frame)));
+            if let Err(payload) = result {
+                self.crash_runner("render", panic_payload_to_string(payload));
+            }
         }
 
         let delta = FrameDelta::between(&self.previous_frame, &self.frame);
@@ -242,6 +280,17 @@ impl RuntimeRunner {
     }
 }
 
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    let payload = payload.as_ref();
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "panic payload was non-string".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -323,6 +372,53 @@ mod tests {
         }
     }
 
+    struct PanicOnUpdateGame;
+
+    impl Game for PanicOnUpdateGame {
+        fn id(&self) -> &'static str {
+            "panic-update"
+        }
+
+        fn init(&mut self, _ctx: &InitCtx) -> Result<()> {
+            Ok(())
+        }
+
+        fn update(&mut self, _event: RuntimeEvent, _ctx: &mut UpdateCtx) -> Result<()> {
+            std::panic::resume_unwind(Box::new("update panic".to_string()))
+        }
+
+        fn render(&self, frame: &mut crate::Frame) {
+            frame.set(
+                0,
+                0,
+                crate::Cell {
+                    glyph: 'U',
+                    ..crate::Cell::default()
+                },
+            );
+        }
+    }
+
+    struct PanicOnRenderGame;
+
+    impl Game for PanicOnRenderGame {
+        fn id(&self) -> &'static str {
+            "panic-render"
+        }
+
+        fn init(&mut self, _ctx: &InitCtx) -> Result<()> {
+            Ok(())
+        }
+
+        fn update(&mut self, _event: RuntimeEvent, _ctx: &mut UpdateCtx) -> Result<()> {
+            Ok(())
+        }
+
+        fn render(&self, _frame: &mut crate::Frame) {
+            std::panic::resume_unwind(Box::new("render panic".to_string()))
+        }
+    }
+
     #[test]
     fn auto_perf_emits_transition_signal() -> Result<()> {
         let mut runner = RuntimeRunner::new(20, 10);
@@ -366,6 +462,72 @@ mod tests {
 
         assert_eq!(pauses.load(Ordering::SeqCst), 1);
         assert_eq!(resumes.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn panic_in_update_emits_single_crash_signal_and_stops_runner() -> Result<()> {
+        let mut runner = RuntimeRunner::new(20, 10);
+        runner.start(Box::new(PanicOnUpdateGame), 7)?;
+        let _ = runner.take_signals();
+        runner.toggle_fullscreen();
+
+        runner.dispatch(RuntimeEvent::Tick { dt_ms: 16 })?;
+        let signals = runner.take_signals();
+        let crashed = signals
+            .iter()
+            .filter_map(|signal| match signal {
+                RunnerSignal::Crashed(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(crashed.len(), 1);
+        assert!(crashed[0].contains("runner-crash-update-000001"));
+        assert!(!runner.is_running());
+        assert!(!runner.is_fullscreen());
+        assert!(!runner.is_paused());
+
+        runner.dispatch(RuntimeEvent::Tick { dt_ms: 16 })?;
+        let follow_up = runner.take_signals();
+        let follow_up_crashed = follow_up
+            .iter()
+            .filter(|signal| matches!(signal, RunnerSignal::Crashed(_)))
+            .count();
+        assert_eq!(follow_up_crashed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn panic_in_render_emits_single_crash_signal_and_stops_runner() -> Result<()> {
+        let mut runner = RuntimeRunner::new(20, 10);
+        runner.start(Box::new(PanicOnRenderGame), 9)?;
+        let _ = runner.take_signals();
+        runner.toggle_fullscreen();
+
+        let _ = runner.render();
+        let signals = runner.take_signals();
+        let crashed = signals
+            .iter()
+            .filter_map(|signal| match signal {
+                RunnerSignal::Crashed(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(crashed.len(), 1);
+        assert!(crashed[0].contains("runner-crash-render-000001"));
+        assert!(!runner.is_running());
+        assert!(!runner.is_fullscreen());
+        assert!(!runner.is_paused());
+
+        let _ = runner.render();
+        let follow_up = runner.take_signals();
+        let follow_up_crashed = follow_up
+            .iter()
+            .filter(|signal| matches!(signal, RunnerSignal::Crashed(_)))
+            .count();
+        assert_eq!(follow_up_crashed, 0);
         Ok(())
     }
 }
