@@ -16,6 +16,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Home route now follows `Continue`, `Featured`, `Recently Played`, and `Updates` sections with persisted continue-target routing.
 - Installed route now renders version/source metadata and planned verify/rollback/update actions.
 - Content store now supports loading/saving `installed.json` records with tests.
+- Added `dark-forest --replay <path>` headless mode for running replay fixtures from the CLI.
 
 ### Changed
 
