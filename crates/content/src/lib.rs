@@ -1,14 +1,18 @@
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
+use plugin_host::{Capability, Decision, Scope};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -88,10 +92,19 @@ impl HighScores {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledFile {
     pub schema_version: u32,
     pub installed: Vec<InstalledRecord>,
+}
+
+impl Default for InstalledFile {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            installed: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +112,43 @@ pub struct InstalledRecord {
     pub id: String,
     pub source: String,
     pub current_version: String,
+    #[serde(default)]
+    pub installed_versions: Vec<String>,
+    #[serde(default)]
+    pub version_checksums: BTreeMap<String, String>,
+}
+
+impl InstalledRecord {
+    fn normalize(&mut self) {
+        if self.installed_versions.is_empty() && !self.current_version.is_empty() {
+            self.installed_versions.push(self.current_version.clone());
+        }
+
+        if !self
+            .installed_versions
+            .iter()
+            .any(|item| item == &self.current_version)
+            && !self.current_version.is_empty()
+        {
+            self.installed_versions.push(self.current_version.clone());
+        }
+
+        let mut deduped = Vec::with_capacity(self.installed_versions.len());
+        for version in &self.installed_versions {
+            if !deduped.contains(version) {
+                deduped.push(version.clone());
+            }
+        }
+        self.installed_versions = deduped;
+    }
+
+    fn push_version(&mut self, version: &str) {
+        if !self.installed_versions.iter().any(|item| item == version) {
+            self.installed_versions.push(version.to_string());
+        }
+        self.current_version = version.to_string();
+        self.normalize();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,10 +159,67 @@ pub struct PermissionsFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionGrant {
-    pub capability: String,
-    pub scope: String,
-    pub decision: String,
+    pub capability: Capability,
+    pub scope: Scope,
+    pub decision: Decision,
     pub remembered: bool,
+    pub granted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallRequest {
+    pub game_id: String,
+    pub version: String,
+    pub source: String,
+    pub artifact_dir: PathBuf,
+    pub expected_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallOutcome {
+    pub game_id: String,
+    pub version: String,
+    pub current_pointer: String,
+    pub checksum_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RollbackOutcome {
+    pub game_id: String,
+    pub from_version: String,
+    pub to_version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyOutcome {
+    pub game_id: String,
+    pub version: String,
+    pub verified: bool,
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: String,
+}
+
+#[derive(Debug, Error)]
+pub enum ContentTransactionError {
+    #[error("invalid artifact directory: {0}")]
+    InvalidArtifact(PathBuf),
+    #[error("artifact manifest is missing required field '{0}'")]
+    InvalidManifestField(String),
+    #[error("artifact manifest id/version mismatch (expected {expected_id}@{expected_version})")]
+    ManifestMismatch {
+        expected_id: String,
+        expected_version: String,
+    },
+    #[error("checksum mismatch (expected {expected}, actual {actual})")]
+    ChecksumMismatch { expected: String, actual: String },
+    #[error("game is not installed: {0}")]
+    GameNotInstalled(String),
+    #[error("no rollback target exists for game: {0}")]
+    NoRollbackTarget(String),
+    #[error("installed version directory is missing for {game_id}@{version}")]
+    MissingInstalledVersion { game_id: String, version: String },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub trait ContentStore {
@@ -122,6 +229,8 @@ pub trait ContentStore {
     fn save_play_history(&self, history: &PlayHistoryMap) -> Result<()>;
     fn load_installed(&self) -> Result<InstalledFile>;
     fn save_installed(&self, installed: &InstalledFile) -> Result<()>;
+    fn load_permissions(&self) -> Result<PermissionsFile>;
+    fn save_permissions(&self, permissions: &PermissionsFile) -> Result<()>;
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores>;
     fn save_high_scores(&self, game_id: &str, scores: &HighScores) -> Result<()>;
 }
@@ -150,12 +259,210 @@ impl JsonContentStore {
         &self.root
     }
 
+    #[must_use]
+    pub fn cache_dir_path(&self) -> PathBuf {
+        self.cache_dir()
+    }
+
     pub fn ensure_layout(&self) -> Result<()> {
         fs::create_dir_all(&self.root)?;
         fs::create_dir_all(self.high_scores_dir())?;
         fs::create_dir_all(self.quarantine_dir())?;
+        fs::create_dir_all(self.games_dir())?;
+        fs::create_dir_all(self.tmp_dir())?;
+        fs::create_dir_all(self.cache_dir())?;
         self.ensure_seed_files()?;
         Ok(())
+    }
+
+    pub fn install_from_directory(
+        &self,
+        request: &InstallRequest,
+    ) -> std::result::Result<InstallOutcome, ContentTransactionError> {
+        self.ensure_layout()
+            .map_err(ContentTransactionError::Other)?;
+
+        validate_artifact_manifest(&request.artifact_dir, &request.game_id, &request.version)?;
+
+        let stage_dir = self
+            .tmp_dir()
+            .join(format!("install-{}-{}", request.game_id, request.version));
+
+        if stage_dir.exists() {
+            fs::remove_dir_all(&stage_dir).map_err(|err| {
+                ContentTransactionError::Other(anyhow!(
+                    "failed to clean stale stage dir {}: {err}",
+                    stage_dir.display()
+                ))
+            })?;
+        }
+
+        copy_dir_recursive(&request.artifact_dir, &stage_dir)
+            .map_err(ContentTransactionError::Other)?;
+        let checksum = hash_directory_sha256(&stage_dir).map_err(ContentTransactionError::Other)?;
+
+        if let Some(expected) = &request.expected_sha256
+            && !expected.eq_ignore_ascii_case(&checksum)
+        {
+            let _ = fs::remove_dir_all(&stage_dir);
+            return Err(ContentTransactionError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: checksum,
+            });
+        }
+
+        let final_dir = self.game_version_dir(&request.game_id, &request.version);
+        fs::create_dir_all(self.game_dir(&request.game_id))
+            .map_err(|err| ContentTransactionError::Other(anyhow!(err)))?;
+        if final_dir.exists() {
+            let _ = fs::remove_dir_all(&stage_dir);
+        } else {
+            fs::rename(&stage_dir, &final_dir).map_err(|err| {
+                ContentTransactionError::Other(anyhow!(
+                    "failed to atomically move staged artifact to {}: {err}",
+                    final_dir.display()
+                ))
+            })?;
+        }
+
+        let mut installed = self
+            .load_installed()
+            .map_err(ContentTransactionError::Other)?;
+        let prior_current = installed
+            .installed
+            .iter()
+            .find(|record| record.id == request.game_id)
+            .map(|record| record.current_version.clone());
+
+        let record = upsert_installed_record(&mut installed, &request.game_id, &request.source);
+        record.push_version(&request.version);
+        record
+            .version_checksums
+            .insert(request.version.clone(), checksum.clone());
+
+        self.write_current_pointer(&request.game_id, &request.version)
+            .map_err(ContentTransactionError::Other)?;
+
+        if let Err(err) = self.save_installed(&installed) {
+            if let Some(previous) = prior_current {
+                let _ = self.write_current_pointer(&request.game_id, &previous);
+            }
+            return Err(ContentTransactionError::Other(err));
+        }
+
+        Ok(InstallOutcome {
+            game_id: request.game_id.clone(),
+            version: request.version.clone(),
+            current_pointer: request.version.clone(),
+            checksum_sha256: checksum,
+        })
+    }
+
+    pub fn rollback_game(
+        &self,
+        game_id: &str,
+    ) -> std::result::Result<RollbackOutcome, ContentTransactionError> {
+        let mut installed = self
+            .load_installed()
+            .map_err(ContentTransactionError::Other)?;
+
+        let record = installed
+            .installed
+            .iter_mut()
+            .find(|entry| entry.id == game_id)
+            .ok_or_else(|| ContentTransactionError::GameNotInstalled(game_id.to_string()))?;
+
+        let from_version = record.current_version.clone();
+        let current_idx = record
+            .installed_versions
+            .iter()
+            .position(|item| item == &record.current_version)
+            .unwrap_or_else(|| record.installed_versions.len().saturating_sub(1));
+
+        if current_idx == 0 || record.installed_versions.len() < 2 {
+            return Err(ContentTransactionError::NoRollbackTarget(
+                game_id.to_string(),
+            ));
+        }
+
+        let to_version = record.installed_versions[current_idx - 1].clone();
+        if !self.game_version_dir(game_id, &to_version).exists() {
+            return Err(ContentTransactionError::MissingInstalledVersion {
+                game_id: game_id.to_string(),
+                version: to_version,
+            });
+        }
+
+        record.current_version = to_version.clone();
+        record.normalize();
+
+        self.write_current_pointer(game_id, &to_version)
+            .map_err(ContentTransactionError::Other)?;
+
+        if let Err(err) = self.save_installed(&installed) {
+            let _ = self.write_current_pointer(game_id, &from_version);
+            return Err(ContentTransactionError::Other(err));
+        }
+
+        Ok(RollbackOutcome {
+            game_id: game_id.to_string(),
+            from_version,
+            to_version,
+        })
+    }
+
+    pub fn verify_game(
+        &self,
+        game_id: &str,
+    ) -> std::result::Result<VerifyOutcome, ContentTransactionError> {
+        let installed = self
+            .load_installed()
+            .map_err(ContentTransactionError::Other)?;
+
+        let record = installed
+            .installed
+            .iter()
+            .find(|entry| entry.id == game_id)
+            .ok_or_else(|| ContentTransactionError::GameNotInstalled(game_id.to_string()))?;
+
+        let version_dir = self.game_version_dir(game_id, &record.current_version);
+        if !version_dir.exists() {
+            return Err(ContentTransactionError::MissingInstalledVersion {
+                game_id: game_id.to_string(),
+                version: record.current_version.clone(),
+            });
+        }
+
+        let actual_sha256 =
+            hash_directory_sha256(&version_dir).map_err(ContentTransactionError::Other)?;
+        let expected_sha256 = record
+            .version_checksums
+            .get(&record.current_version)
+            .cloned();
+
+        let verified = expected_sha256
+            .as_ref()
+            .is_none_or(|expected| expected.eq_ignore_ascii_case(&actual_sha256));
+
+        Ok(VerifyOutcome {
+            game_id: game_id.to_string(),
+            version: record.current_version.clone(),
+            verified,
+            expected_sha256,
+            actual_sha256,
+        })
+    }
+
+    #[must_use]
+    pub fn read_current_pointer(&self, game_id: &str) -> Option<String> {
+        let path = self.current_pointer_path(game_id);
+        let value = fs::read_to_string(path).ok()?;
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -176,6 +483,30 @@ impl JsonContentStore {
 
     fn quarantine_dir(&self) -> PathBuf {
         self.root.join("quarantine")
+    }
+
+    fn games_dir(&self) -> PathBuf {
+        self.root.join("games")
+    }
+
+    fn game_dir(&self, game_id: &str) -> PathBuf {
+        self.games_dir().join(game_id)
+    }
+
+    fn game_version_dir(&self, game_id: &str, version: &str) -> PathBuf {
+        self.game_dir(game_id).join(version)
+    }
+
+    fn current_pointer_path(&self, game_id: &str) -> PathBuf {
+        self.game_dir(game_id).join("current")
+    }
+
+    fn tmp_dir(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        self.root.join("cache")
     }
 
     fn installed_path(&self) -> PathBuf {
@@ -202,13 +533,7 @@ impl JsonContentStore {
         }
 
         if !self.installed_path().exists() {
-            self.atomic_write_json(
-                &self.installed_path(),
-                &InstalledFile {
-                    schema_version: CURRENT_SCHEMA_VERSION,
-                    installed: Vec::new(),
-                },
-            )?;
+            self.atomic_write_json(&self.installed_path(), &InstalledFile::default())?;
         }
 
         if !self.permissions_path().exists() {
@@ -291,6 +616,29 @@ impl JsonContentStore {
 
         Ok(())
     }
+
+    fn write_current_pointer(&self, game_id: &str, version: &str) -> Result<()> {
+        let pointer_path = self.current_pointer_path(game_id);
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let tmp_path = pointer_path.with_extension("tmp");
+        fs::write(&tmp_path, format!("{version}\n"))?;
+        if let Ok(file) = File::open(&tmp_path) {
+            let _ = file.sync_all();
+        }
+
+        fs::rename(&tmp_path, &pointer_path)?;
+
+        if let Some(parent) = pointer_path.parent()
+            && let Ok(dir) = File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+
+        Ok(())
+    }
 }
 
 impl ContentStore for JsonContentStore {
@@ -324,11 +672,26 @@ impl ContentStore for JsonContentStore {
         self.ensure_layout()?;
         let path = self.installed_path();
         let loaded = self.read_json_or_quarantine::<InstalledFile>(&path)?;
-        Ok(loaded.unwrap_or_default())
+        Ok(normalize_installed_file(loaded.unwrap_or_default()))
     }
 
     fn save_installed(&self, installed: &InstalledFile) -> Result<()> {
-        self.atomic_write_json(&self.installed_path(), installed)
+        let normalized = normalize_installed_file(installed.clone());
+        self.atomic_write_json(&self.installed_path(), &normalized)
+    }
+
+    fn load_permissions(&self) -> Result<PermissionsFile> {
+        self.ensure_layout()?;
+        let path = self.permissions_path();
+        let loaded = self.read_json_or_quarantine::<PermissionsFile>(&path)?;
+        Ok(loaded.unwrap_or(PermissionsFile {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            grants: BTreeMap::new(),
+        }))
+    }
+
+    fn save_permissions(&self, permissions: &PermissionsFile) -> Result<()> {
+        self.atomic_write_json(&self.permissions_path(), permissions)
     }
 
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores> {
@@ -343,12 +706,173 @@ impl ContentStore for JsonContentStore {
     }
 }
 
+fn upsert_installed_record<'a>(
+    installed: &'a mut InstalledFile,
+    game_id: &str,
+    source: &str,
+) -> &'a mut InstalledRecord {
+    if let Some(index) = installed
+        .installed
+        .iter()
+        .position(|record| record.id == game_id)
+    {
+        let existing = &mut installed.installed[index];
+        existing.source = source.to_string();
+        return existing;
+    }
+
+    installed.installed.push(InstalledRecord {
+        id: game_id.to_string(),
+        source: source.to_string(),
+        current_version: String::new(),
+        installed_versions: Vec::new(),
+        version_checksums: BTreeMap::new(),
+    });
+
+    installed.installed.last_mut().expect("record was inserted")
+}
+
+fn normalize_installed_file(mut installed: InstalledFile) -> InstalledFile {
+    installed.schema_version = CURRENT_SCHEMA_VERSION;
+    for record in &mut installed.installed {
+        record.normalize();
+    }
+    installed
+}
+
+fn validate_artifact_manifest(
+    artifact_dir: &Path,
+    expected_id: &str,
+    expected_version: &str,
+) -> std::result::Result<(), ContentTransactionError> {
+    if !artifact_dir.exists() || !artifact_dir.is_dir() {
+        return Err(ContentTransactionError::InvalidArtifact(
+            artifact_dir.to_path_buf(),
+        ));
+    }
+
+    let manifest_path = artifact_dir.join("game.json");
+    if !manifest_path.exists() {
+        return Err(ContentTransactionError::InvalidArtifact(manifest_path));
+    }
+
+    let raw = fs::read_to_string(&manifest_path).map_err(|err| {
+        ContentTransactionError::Other(anyhow!(
+            "failed to read artifact manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+
+    let json: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        ContentTransactionError::Other(anyhow!(
+            "failed to parse artifact manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+
+    let id = json
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ContentTransactionError::InvalidManifestField("id".to_string()))?;
+    let version = json
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ContentTransactionError::InvalidManifestField("version".to_string()))?;
+
+    if id != expected_id || version != expected_version {
+        return Err(ContentTransactionError::ManifestMismatch {
+            expected_id: expected_id.to_string(),
+            expected_version: expected_version.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
+    if !source.exists() || !source.is_dir() {
+        return Err(anyhow!("source directory is invalid: {}", source.display()));
+    }
+
+    fs::create_dir_all(dest)?;
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let target = dest.join(&file_name);
+
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+            continue;
+        }
+
+        if path.is_file() {
+            fs::copy(&path, &target)
+                .with_context(|| format!("failed to copy {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn hash_directory_sha256(dir: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_files(dir, dir, &mut files)?;
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let absolute = dir.join(&relative);
+        hasher.update(relative.as_os_str().to_string_lossy().as_bytes());
+        hasher.update([0_u8]);
+        let bytes = fs::read(&absolute)
+            .with_context(|| format!("failed to read {} for hashing", absolute.display()))?;
+        hasher.update(bytes);
+    }
+
+    Ok(to_hex_lower(&hasher.finalize()))
+}
+
+fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, files)?;
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+                .map_err(|err| anyhow!("failed to strip prefix for {}: {err}", path.display()))?;
+            if relative.file_name() == Some(OsStr::new("current")) {
+                continue;
+            }
+            files.push(relative);
+        }
+    }
+
+    Ok(())
+}
+
+fn to_hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ContentStore, JsonContentStore, PlayHistoryRecord};
+    use super::{
+        ContentStore, Decision, InstallRequest, JsonContentStore, PermissionGrant,
+        PlayHistoryRecord, Scope,
+    };
     use anyhow::{Result, anyhow};
+    use plugin_host::Capability;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn saves_and_loads_settings() -> Result<()> {
@@ -412,6 +936,8 @@ mod tests {
             id: "snake-plus".to_string(),
             source: "builtin://dark-forest".to_string(),
             current_version: "0.1.0".to_string(),
+            installed_versions: vec!["0.1.0".to_string()],
+            version_checksums: BTreeMap::new(),
         });
         store.save_installed(&installed)?;
 
@@ -419,5 +945,226 @@ mod tests {
         assert_eq!(reloaded.installed.len(), 1);
         assert_eq!(reloaded.installed[0].id, "snake-plus");
         Ok(())
+    }
+
+    #[test]
+    fn install_commits_current_atomically() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+
+        let artifact = create_artifact_dir(root.as_path(), "snake-plus", "0.2.0")?;
+        let outcome = store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.2.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: artifact,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        assert_eq!(outcome.current_pointer, "0.2.0");
+        assert_eq!(
+            store.read_current_pointer("snake-plus"),
+            Some("0.2.0".to_string())
+        );
+
+        let installed = store.load_installed()?;
+        let record = installed
+            .installed
+            .iter()
+            .find(|entry| entry.id == "snake-plus")
+            .ok_or_else(|| anyhow!("missing installed record"))?;
+        assert_eq!(record.current_version, "0.2.0");
+        assert!(record.installed_versions.iter().any(|item| item == "0.2.0"));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_install_never_switches_current() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+
+        let first = create_artifact_dir(root.as_path(), "snake-plus", "0.1.0")?;
+        store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.1.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: first,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        let second = create_artifact_dir(root.as_path(), "snake-plus", "0.2.0")?;
+        let result = store.install_from_directory(&InstallRequest {
+            game_id: "snake-plus".to_string(),
+            version: "0.2.0".to_string(),
+            source: "local://fixtures".to_string(),
+            artifact_dir: second,
+            expected_sha256: Some("deadbeef".to_string()),
+        });
+        assert!(result.is_err());
+
+        assert_eq!(
+            store.read_current_pointer("snake-plus"),
+            Some("0.1.0".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_repoints_current_to_previous() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+
+        let v1 = create_artifact_dir(root.as_path(), "snake-plus", "0.1.0")?;
+        let v2 = create_artifact_dir(root.as_path(), "snake-plus", "0.2.0")?;
+
+        store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.1.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: v1,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.2.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: v2,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        let outcome = store
+            .rollback_game("snake-plus")
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        assert_eq!(outcome.from_version, "0.2.0");
+        assert_eq!(outcome.to_version, "0.1.0");
+        assert_eq!(
+            store.read_current_pointer("snake-plus"),
+            Some("0.1.0".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_detects_checksum_mismatch() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+
+        let artifact = create_artifact_dir(root.as_path(), "snake-plus", "0.1.0")?;
+        store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.1.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: artifact,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        std::fs::write(
+            root.join("games/snake-plus/0.1.0/payload.txt"),
+            "tampered content",
+        )?;
+
+        let outcome = store
+            .verify_game("snake-plus")
+            .map_err(|err| anyhow!(err.to_string()))?;
+        assert!(!outcome.verified);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_installed_record_is_upgraded_in_memory() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "installed": [
+                {
+                    "id": "snake-plus",
+                    "source": "builtin://dark-forest",
+                    "current_version": "0.1.0"
+                }
+            ]
+        });
+        std::fs::write(
+            root.join("installed.json"),
+            serde_json::to_vec_pretty(&legacy)?,
+        )?;
+
+        let installed = store.load_installed()?;
+        let record = installed
+            .installed
+            .iter()
+            .find(|item| item.id == "snake-plus")
+            .ok_or_else(|| anyhow!("missing migrated record"))?;
+
+        assert!(record.installed_versions.iter().any(|item| item == "0.1.0"));
+        Ok(())
+    }
+
+    #[test]
+    fn permissions_store_round_trip() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(PathBuf::from(temp.path()));
+
+        let mut permissions = store.load_permissions()?;
+        permissions.grants.insert(
+            "snake-plus".to_string(),
+            vec![PermissionGrant {
+                capability: Capability::TerminalRawInput,
+                scope: Scope::None,
+                decision: Decision::Allow,
+                remembered: true,
+                granted_at: chrono::Utc::now(),
+            }],
+        );
+
+        store.save_permissions(&permissions)?;
+        let reloaded = store.load_permissions()?;
+
+        let grants = reloaded
+            .grants
+            .get("snake-plus")
+            .ok_or_else(|| anyhow!("missing grants"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].capability, Capability::TerminalRawInput);
+        Ok(())
+    }
+
+    fn create_artifact_dir(root: &Path, id: &str, version: &str) -> Result<PathBuf> {
+        let dir = root.join(format!("artifact-{id}-{version}"));
+        std::fs::create_dir_all(&dir)?;
+
+        let manifest = serde_json::json!({
+            "id": id,
+            "name": "Test Game",
+            "version": version,
+            "author": "Dark Forest",
+            "entry_type": "wasm",
+            "entry": "main.wasm",
+            "host_api": "^0.1",
+            "permissions": ["terminal.raw_input"]
+        });
+
+        std::fs::write(dir.join("game.json"), serde_json::to_vec_pretty(&manifest)?)?;
+        std::fs::write(dir.join("payload.txt"), format!("payload-{version}"))?;
+        Ok(dir)
     }
 }

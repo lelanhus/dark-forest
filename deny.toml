@@ -12,10 +12,7 @@ allow = [
   "Apache-2.0",
   "MPL-2.0",
   "BSD-2-Clause",
-  "BSD-3-Clause",
-  "ISC",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
   "Zlib"
 ]
 private = { ignore = false }
@@ -24,6 +21,10 @@ private = { ignore = false }
 multiple-versions = "warn"
 wildcards = "allow"
 highlight = "all"
+skip = [
+  { name = "rustix", version = "=0.38.44" },
+  { name = "unicode-width", version = "=0.1.14" }
+]
 
 [sources]
 unknown-registry = "deny"

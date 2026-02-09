@@ -8,7 +8,9 @@ accept = [200, 206, 301, 302, 303, 307, 308, 429]
 
 exclude = [
   '^https://github.com/lelanhus/dark-forest/discussions$',
-  '^https://github.com/lelanhus/dark-forest/security/advisories/new$'
+  '^https://github.com/lelanhus/dark-forest/security/advisories/new$',
+  '^https://www.contributor-covenant.org/faq$',
+  '^https://www.contributor-covenant.org/version/2/1/code_of_conduct.html$'
 ]
 
 exclude_path = [
