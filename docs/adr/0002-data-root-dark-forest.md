@@ -8,7 +8,8 @@
 
 ## Context
 
-Earlier planning documents referenced `~/.tui-arcade/` as the host data root. The project brand and binary identity are `dark-forest`, and no released runtime has persisted user data yet.
+Earlier planning documents referenced `~/.tui-arcade/` as the host data root. The project brand
+and binary identity are `dark-forest`, and no released runtime has persisted user data yet.
 
 ## Decision
 

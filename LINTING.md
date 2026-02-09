@@ -5,9 +5,11 @@ Dark Forest enforces strict linting and documentation quality gates.
 ## Mandatory Rust Gates
 
 1. Formatting
+
 - `cargo fmt --all -- --check`
 
-2. Clippy
+1. Clippy
+
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Expected strict profile includes:
   - `clippy::all`
@@ -15,7 +17,8 @@ Dark Forest enforces strict linting and documentation quality gates.
   - `clippy::cargo`
   - Selected `clippy::nursery` lints when stable and useful
 
-3. Rustdoc warnings as errors
+1. Rustdoc warnings as errors
+
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
 
 ## Documentation Gates

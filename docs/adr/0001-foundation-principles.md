@@ -8,7 +8,9 @@
 
 ## Context
 
-Dark Forest begins as a high-reliability terminal game console with strict safety and quality goals. Early project decisions must prevent process drift and trust-boundary regressions as implementation starts.
+Dark Forest begins as a high-reliability terminal game console with strict safety and quality
+goals. Early project decisions must prevent process drift and trust-boundary regressions as
+implementation starts.
 
 ## Decision
 

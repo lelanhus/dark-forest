@@ -15,24 +15,29 @@ Dark Forest prioritizes reliability, clarity, and safety over short-term speed.
 These standards are adapted from mission-critical engineering practices and applied pragmatically.
 
 1. Bounded complexity
+
 - Keep functions small and focused.
 - Keep nesting and branching constrained.
 - Refactor when logic becomes difficult to reason about.
 
-2. Structured control flow
+1. Structured control flow
+
 - Avoid recursion in mission-critical runtime loops unless justified by ADR.
 - Avoid unbounded loops without clear termination or watchdog checks.
 
-3. Explicit error handling
+1. Explicit error handling
+
 - Handle all recoverable errors.
 - Use typed error domains and meaningful context.
 - Never swallow errors silently.
 
-4. Invariants and contracts
+1. Invariants and contracts
+
 - Validate assumptions at module boundaries.
 - Fail fast with clear diagnostics when invariants break.
 
-5. Traceability
+1. Traceability
+
 - Critical requirements must map to tests.
 - Security/performance-sensitive changes require rationale in PR and, when applicable, ADR.
 

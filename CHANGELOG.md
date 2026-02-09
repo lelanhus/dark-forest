@@ -44,7 +44,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 
 - Corrected game start seeding so game instantiation and runtime init use the same deterministic seed.
-- Runtime now isolates panics from game `update`/`render`, emits crash IDs, and returns control to the shell instead of terminating the host process.
+- Runtime now isolates panics from game `update`/`render`, emits crash IDs, and returns control to
+  the shell instead of terminating the host process.
 
 ### Security
 

@@ -15,22 +15,27 @@ No production change is accepted without test-first evidence.
 ## Test Layers
 
 1. Unit tests
+
 - Small, fast, isolated logic checks.
 - Required for runtime primitives and data validation.
 
-2. Integration tests
+1. Integration tests
+
 - Exercise crate boundaries and subsystem interactions.
 - Required for install/update/rollback and registry/provider flows.
 
-3. Snapshot tests
+1. Snapshot tests
+
 - Golden frame tests for renderer output.
 - Must include terminal capability variance cases when relevant.
 
-4. Replay tests
+1. Replay tests
+
 - Record input event streams and verify deterministic outcomes.
 - Required for runtime pacing and gameplay consistency.
 
-5. Property and fuzz tests
+1. Property and fuzz tests
+
 - Required for manifest parsing, registry payload parsing, and key trust-boundary parsers.
 
 ## Security and Reliability Test Expectations

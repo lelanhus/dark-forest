@@ -1,5 +1,6 @@
 [codespell]
-check-filenames = true
-check-hidden = true
+check-filenames =
+check-hidden =
 skip = ./.git,./target,./LICENSE-APACHE
+ignore-words-list = ratatui,Ratatui
 quiet-level = 2

@@ -1,6 +1,8 @@
 # SPEC.md — Rust TUI Arcade Console
 
-> **Mission:** Ship a terminal-native “game console” that feels like a GUI: fast, beautiful, extensible, and safe-by-default. Runs great on Raspberry Pi-class hardware. Ships with native games on day one, and grows into a sandboxed marketplace ecosystem.
+> **Mission:** Ship a terminal-native “game console” that feels like a GUI: fast, beautiful,
+> extensible, and safe-by-default. Runs great on Raspberry Pi-class hardware. Ships with native
+> games on day one, and grows into a sandboxed marketplace ecosystem.
 
 ---
 

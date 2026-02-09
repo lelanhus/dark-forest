@@ -83,7 +83,8 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true' && steps.coverage_gate.outcome == 'failure'
         run: |
           echo "::warning::Workspace line coverage is below 85%."
-          echo "::warning::Coverage remains mandatory by policy; temporary CI advisory is active until changed-path gating is implemented."
+          echo "::warning::Coverage remains mandatory by policy."
+          echo "::warning::Temporary CI advisory is active until changed-path gating is implemented."
 
       - name: Install cargo-deny
         if: steps.detect.outputs.has_cargo == 'true'
@@ -152,7 +153,8 @@ jobs:
     steps:
       - name: Finalize rust quality status
         run: |
-          if [ "${{ needs.rust-quality-linux.result }}" != "success" ] || [ "${{ needs.rust-quality-macos.result }}" != "success" ]; then
+          if [ "${{ needs.rust-quality-linux.result }}" != "success" ] || \
+             [ "${{ needs.rust-quality-macos.result }}" != "success" ]; then
             echo "rust-quality matrix failed"
             exit 1
           fi

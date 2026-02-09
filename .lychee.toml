@@ -2,7 +2,7 @@ max_concurrency = 12
 max_retries = 2
 retry_wait_time = 2
 timeout = 20
-verbose = true
+verbose = "info"
 
 accept = [200, 206, 301, 302, 303, 307, 308, 429]
 
@@ -12,5 +12,6 @@ exclude = [
 ]
 
 exclude_path = [
-  "LICENSE-APACHE"
+  "LICENSE-APACHE",
+  "target/**"
 ]

@@ -11,14 +11,17 @@ Dark Forest uses a maintainer-led model with a single final technical arbiter (B
 ## Decision Classes
 
 1. Routine decisions
+
 - Normal bug fixes, docs updates, and scoped improvements.
 - Resolved in PR review.
 
-2. Significant technical decisions
+1. Significant technical decisions
+
 - Architecture, security, performance, data compatibility, dependency policy, or unsafe exceptions.
 - Must be recorded as ADRs in `docs/adr/`.
 
-3. Emergency decisions
+1. Emergency decisions
+
 - Security incidents or release-blocking regressions.
 - Maintainers may act immediately, then publish post-incident rationale.
 

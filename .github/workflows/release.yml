@@ -92,7 +92,8 @@ jobs:
         if: matrix.smoke && matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          .\target\${{ matrix.target }}\release\${{ steps.meta.outputs.binary }} --replay fixtures/replays/snake-seed-12345.json
+          .\target\${{ matrix.target }}\release\${{ steps.meta.outputs.binary }} `
+            --replay fixtures/replays/snake-seed-12345.json
 
       - name: Package artifact (Unix)
         if: matrix.os != 'windows-latest'
@@ -110,7 +111,9 @@ jobs:
           New-Item -ItemType Directory -Path release\pkg -Force | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\${{ steps.meta.outputs.binary }}" release\pkg\
           Copy-Item LICENSE-APACHE, LICENSE-MIT, README.md release\pkg\
-          Compress-Archive -Path release\pkg\* -DestinationPath ("release\" + "${{ steps.meta.outputs.archive }}") -Force
+          Compress-Archive -Path release\pkg\* `
+            -DestinationPath ("release\" + "${{ steps.meta.outputs.archive }}") `
+            -Force
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4

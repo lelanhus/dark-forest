@@ -2,7 +2,8 @@
 
 Dark Forest is a terminal-native arcade console written in Rust.
 
-The mission is to deliver a terminal experience that feels like a GUI: fast, beautiful, extensible, and safe by default, including on Raspberry Pi-class hardware.
+The mission is to deliver a terminal experience that feels like a GUI: fast, beautiful, extensible,
+and safe by default, including on Raspberry Pi-class hardware.
 
 ## Status
 

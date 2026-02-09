@@ -66,8 +66,8 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-4. Monitor `release` workflow run.
-5. Verify GitHub Release assets and checksum file.
+1. Monitor `release` workflow run.
+2. Verify GitHub Release assets and checksum file.
 
 ## Verification Checklist
 
