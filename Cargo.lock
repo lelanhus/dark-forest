@@ -882,6 +882,7 @@ dependencies = [
  "pretty_assertions",
  "ratatui",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
