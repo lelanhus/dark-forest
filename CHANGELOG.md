@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Runner pause menu plus restart/quit confirmation overlays.
 - Game Detail stats summary (plays, best score, last played).
 - Runtime tests for auto-performance transition signaling and pause/resume event dispatch.
+- Fixture-driven replay harness in `runtime` with typed replay events and deterministic outcome hashing.
 
 ### Changed
 
