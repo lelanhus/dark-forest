@@ -1,0 +1,5 @@
+[codespell]
+check-filenames = true
+check-hidden = true
+skip = ./.git,./target,./LICENSE-APACHE
+quiet-level = 2

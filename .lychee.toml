@@ -1,0 +1,16 @@
+max_concurrency = 12
+max_retries = 2
+retry_wait_time = 2
+timeout = 20
+verbose = true
+
+accept = [200, 206, 301, 302, 303, 307, 308, 429]
+
+exclude = [
+  '^https://github.com/x24102/dark-forest/discussions$',
+  '^https://github.com/x24102/dark-forest/security/advisories/new$'
+]
+
+exclude_path = [
+  "LICENSE-APACHE"
+]

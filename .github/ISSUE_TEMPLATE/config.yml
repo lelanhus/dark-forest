@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/x24102/dark-forest/security/advisories/new
+    about: Report vulnerabilities privately through GitHub Security Advisories.
+  - name: Questions and design discussion
+    url: https://github.com/x24102/dark-forest/discussions
+    about: Use Discussions for support questions and broad design discussion.

@@ -1,0 +1,20 @@
+# Default ownership
+* @x24102
+
+# Policy and governance docs
+/AGENTS.md @x24102
+/CONTRIBUTING.md @x24102
+/GOVERNANCE.md @x24102
+/SECURITY.md @x24102
+/ENGINEERING_STANDARDS.md @x24102
+/TESTING.md @x24102
+/LINTING.md @x24102
+/DEPENDENCY_POLICY.md @x24102
+
+# Architecture and data contracts
+/ARCHITECTURE.md @x24102
+/DATA_MODEL.md @x24102
+/docs/adr/ @x24102
+
+# Community templates
+/.github/ @x24102
