@@ -14,7 +14,9 @@ These rules apply to every change in this repository, including documentation-on
 4. Implement the minimum change to pass tests.
 5. Run formatting, linting, tests, and docs checks.
 6. Update documentation and ADRs when architecture, security, performance, or policy changes.
-7. Submit PR with explicit evidence for each gate.
+7. Branch from local `main` using `codex/<topic>`.
+8. Merge branch into local `main` only after local quality gates are green.
+9. Push updated `main` to `origin`.
 
 ## Non-Negotiable Rules
 
@@ -22,6 +24,18 @@ These rules apply to every change in this repository, including documentation-on
 - No `unsafe` Rust in production paths unless an ADR-approved exception exists.
 - No silent behavior changes without changelog and test impact notes.
 - No bypass of required quality gates.
+- Do not push failing code to `main`.
+
+## Git Workflow
+
+`main` is maintained through local branch integration and direct push after validation.
+
+1. Branch from `main` using `codex/<topic>`.
+2. Commit with Conventional Commits and DCO sign-off.
+3. Run local quality gates before integration: `make ci`.
+4. Merge branch into local `main` (prefer `--no-ff` to preserve branch history context).
+5. Push `main` to origin.
+6. PRs are optional and primarily used for external collaboration or design review.
 
 ## Command Standards
 
@@ -40,17 +54,21 @@ Standard local entrypoints:
 - `make ci-docs`
 - `make ci-rust`
 - `make ci`
+- `git switch main && git pull --ff-only`
+- `git switch -c codex/<topic>`
+- `git switch main && git merge --no-ff codex/<topic>`
+- `git push origin main`
 
 ## Lint and Test Gate Expectations
 
-A change is not ready for review unless all required checks pass locally and in CI.
+A change is not ready for merge unless all required checks pass locally.
 
 Minimum gates:
 
 - Formatting clean
 - Clippy clean under strict profile
 - Tests passing
-- Coverage policy satisfied (changed-path policy; currently enforced via workspace-level 85% CI gate)
+- Coverage policy tracked (changed-path policy; temporary bootstrap CI runs workspace-level 85% as advisory)
 - Docs checks passing
 - Dependency/security/license checks passing
 

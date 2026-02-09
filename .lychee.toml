@@ -7,8 +7,8 @@ verbose = true
 accept = [200, 206, 301, 302, 303, 307, 308, 429]
 
 exclude = [
-  '^https://github.com/x24102/dark-forest/discussions$',
-  '^https://github.com/x24102/dark-forest/security/advisories/new$'
+  '^https://github.com/lelanhus/dark-forest/discussions$',
+  '^https://github.com/lelanhus/dark-forest/security/advisories/new$'
 ]
 
 exclude_path = [

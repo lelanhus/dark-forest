@@ -42,7 +42,8 @@ No production change is accepted without test-first evidence.
 ## Coverage Policy
 
 - Minimum 85% coverage for changed paths.
-- CI currently enforces this with a workspace-level 85% gate until a changed-path coverage parser is introduced.
+- CI currently runs a workspace-level 85% check as advisory during bootstrap until a changed-path coverage parser is introduced.
+- PRs that reduce coverage quality require explicit maintainer rationale and follow-up issue linkage.
 - Coverage is a gate, not a target ceiling.
 - Exceptions require explicit maintainer approval in PR with rationale.
 
