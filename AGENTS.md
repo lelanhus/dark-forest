@@ -14,7 +14,8 @@ These rules apply to every change in this repository, including documentation-on
 4. Implement the minimum change to pass tests.
 5. Run formatting, linting, tests, and docs checks.
 6. Update documentation and ADRs when architecture, security, performance, or policy changes.
-7. Submit PR with explicit evidence for each gate.
+7. Push a `codex/<topic>` branch and open a PR to `main`.
+8. Merge only after all required checks are green.
 
 ## Non-Negotiable Rules
 
@@ -22,6 +23,18 @@ These rules apply to every change in this repository, including documentation-on
 - No `unsafe` Rust in production paths unless an ADR-approved exception exists.
 - No silent behavior changes without changelog and test impact notes.
 - No bypass of required quality gates.
+- No direct pushes to `main`; use PRs only.
+
+## Git and PR Workflow
+
+`main` is branch-protected and must remain PR-only.
+
+1. Branch from `main` using `codex/<topic>`.
+2. Commit with Conventional Commits and DCO sign-off.
+3. Push branch and open PR to `main`.
+4. Required checks must pass: `docs-quality`, `rust-quality`, `semantic-pr-title`, `dco-signoff`.
+5. Merge when checks are green; required approving reviews are set to `0` for solo-maintainer flow.
+6. Keep linear history; use squash or rebase merges only.
 
 ## Command Standards
 
@@ -40,6 +53,8 @@ Standard local entrypoints:
 - `make ci-docs`
 - `make ci-rust`
 - `make ci`
+- `gh pr create --base main --head codex/<topic> --title \"<type>: <summary>\" --body \"...\"`
+- `gh pr merge --squash --delete-branch`
 
 ## Lint and Test Gate Expectations
 
