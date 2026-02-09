@@ -39,6 +39,14 @@ struct AppModel {
     seed_counter: u64,
 }
 
+fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
+    history
+        .iter()
+        .filter_map(|(id, entry)| entry.last_played_at.as_ref().map(|ts| (id, ts)))
+        .max_by_key(|(_id, ts)| *ts)
+        .map(|(id, _ts)| id.clone())
+}
+
 impl AppModel {
     fn new() -> Result<Self> {
         let listings = builtin_catalog();
@@ -77,8 +85,11 @@ impl AppModel {
         };
         runner.set_perf_mode(perf_mode);
 
+        let mut shell = ShellState::new(games);
+        shell.continue_game_id = latest_played_game_id(&play_history);
+
         Ok(Self {
-            shell: ShellState::new(games),
+            shell,
             runner,
             store,
             settings,
@@ -170,6 +181,7 @@ impl AppModel {
         } else {
             self.best_scores.remove(&game_id);
         }
+        self.shell.continue_game_id = latest_played_game_id(&self.play_history);
 
         let _ = self.store.save_high_scores(&game_id, &scores);
         let _ = self.store.save_play_history(&self.play_history);

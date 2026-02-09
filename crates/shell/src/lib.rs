@@ -57,6 +57,7 @@ pub struct ShellState {
     pub list_index: usize,
     pub settings_index: usize,
     pub performance_mode: String,
+    pub continue_game_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +111,7 @@ impl ShellState {
             list_index: 0,
             settings_index: 0,
             performance_mode: "auto".to_string(),
+            continue_game_id: None,
         }
     }
 
@@ -265,10 +267,13 @@ impl ShellState {
             }
             KeyCode::Enter => {
                 let route = match self.home_index {
-                    0 => Route::Library,
-                    1 => Route::Installed,
-                    2 => Route::Settings,
-                    _ => Route::Library,
+                    0 => self
+                        .continue_game_id
+                        .clone()
+                        .map_or(Route::Library, |id| Route::GameDetail { id }),
+                    1 => Route::Library,
+                    2 => Route::Installed,
+                    _ => Route::Installed,
                 };
                 vec![ShellCommand::OpenRoute(route)]
             }
@@ -376,7 +381,7 @@ pub fn render(frame: &mut ratatui::Frame<'_>, state: &ShellState, context: &Rend
     let status = chunks[1];
 
     match &state.route {
-        Route::Home => render_home(frame, body, state),
+        Route::Home => render_home(frame, body, state, context),
         Route::Library => render_library(frame, body, state, "Library"),
         Route::Installed => render_library(frame, body, state, "Installed"),
         Route::Settings => render_settings(frame, body, state),
@@ -388,13 +393,18 @@ pub fn render(frame: &mut ratatui::Frame<'_>, state: &ShellState, context: &Rend
     render_overlay(frame, state);
 }
 
-fn render_home(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState) {
+fn render_home(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &ShellState,
+    context: &RenderContext,
+) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
-    let items = ["Library", "Installed", "Settings", "Featured"];
+    let items = ["Continue", "Featured", "Recently Played", "Updates"];
     let list_items = items
         .iter()
         .enumerate()
@@ -417,27 +427,122 @@ fn render_home(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState) {
         )
         .highlight_style(selected_style());
 
-    let right = Paragraph::new(vec![
-        Line::from(Span::styled("Dark Forest", title_style())),
-        Line::from(""),
-        Line::from("Terminal-native arcade console."),
-        Line::from(Span::styled(
-            "Mission: GUI-like UX in the terminal.",
-            muted_style(),
-        )),
-        Line::from(""),
-        Line::from("Use Enter to navigate."),
-    ])
-    .block(
-        Block::default()
-            .title("Overview")
-            .borders(Borders::ALL)
-            .style(panel_style()),
-    )
-    .wrap(Wrap { trim: true });
+    let right_lines = home_detail_lines(state, context);
+    let right = Paragraph::new(right_lines)
+        .block(
+            Block::default()
+                .title("Overview")
+                .borders(Borders::ALL)
+                .style(panel_style()),
+        )
+        .wrap(Wrap { trim: true });
 
     frame.render_widget(left, main[0]);
     frame.render_widget(right, main[1]);
+}
+
+fn home_detail_lines(state: &ShellState, context: &RenderContext) -> Vec<Line<'static>> {
+    match state.home_index {
+        0 => {
+            if let Some(id) = &state.continue_game_id
+                && let Some(game) = state.games.iter().find(|item| &item.id == id)
+            {
+                let stats = context.game_stats.get(id).cloned().unwrap_or_default();
+                let best = stats
+                    .best_score
+                    .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+                return vec![
+                    Line::from(Span::styled("Continue", title_style())),
+                    Line::from(""),
+                    Line::from(format!("Next up: {}", game.name)),
+                    Line::from(game.description.clone()),
+                    Line::from(""),
+                    Line::from(format!("Best score: {best}")),
+                    Line::from(format!("Total plays: {}", stats.play_count)),
+                    Line::from(Span::styled(
+                        "Press Enter to resume from detail.",
+                        muted_style(),
+                    )),
+                ];
+            }
+
+            vec![
+                Line::from(Span::styled("Continue", title_style())),
+                Line::from(""),
+                Line::from("No recent game yet."),
+                Line::from(Span::styled(
+                    "Start a game from Library to populate this section.",
+                    muted_style(),
+                )),
+            ]
+        }
+        1 => {
+            let mut lines = vec![
+                Line::from(Span::styled("Featured", title_style())),
+                Line::from(""),
+            ];
+            for game in state.games.iter().take(3) {
+                lines.push(Line::from(format!("- {}", game.name)));
+            }
+            if state.games.is_empty() {
+                lines.push(Line::from("No featured titles available."));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Press Enter to open Library.",
+                muted_style(),
+            )));
+            lines
+        }
+        2 => {
+            let mut entries = context
+                .game_stats
+                .iter()
+                .map(|(id, stats)| (id.clone(), stats.last_played_at.clone(), stats.play_count))
+                .collect::<Vec<_>>();
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let mut lines = vec![
+                Line::from(Span::styled("Recently Played", title_style())),
+                Line::from(""),
+            ];
+
+            for (id, _last_played, play_count) in entries.into_iter().take(5) {
+                if play_count > 0 {
+                    let name = state
+                        .games
+                        .iter()
+                        .find(|game| game.id == id)
+                        .map_or(id.clone(), |game| game.name.clone());
+                    lines.push(Line::from(format!("- {name} ({play_count} plays)")));
+                }
+            }
+
+            if lines.len() <= 2 {
+                lines.push(Line::from("No play history yet."));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Press Enter to open Installed.",
+                muted_style(),
+            )));
+            lines
+        }
+        _ => vec![
+            Line::from(Span::styled("Updates", title_style())),
+            Line::from(""),
+            Line::from("All installed content is up to date."),
+            Line::from(Span::styled(
+                "Marketplace providers arrive in a later milestone.",
+                muted_style(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press Enter to open Installed.",
+                muted_style(),
+            )),
+        ],
+    }
 }
 
 fn render_library(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState, title: &str) {
@@ -920,6 +1025,23 @@ mod tests {
         );
         let selected_id = state.selected_game().map(|g| g.id.as_str());
         assert_eq!(selected_id, Some("tetris-like"));
+    }
+
+    #[test]
+    fn continue_home_entry_opens_game_detail() {
+        let mut state = ShellState::new(sample_games());
+        state.continue_game_id = Some("snake-plus".to_string());
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0],
+            ShellCommand::OpenRoute(Route::GameDetail { .. })
+        ));
     }
 
     #[test]
