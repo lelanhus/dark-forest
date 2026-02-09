@@ -8,15 +8,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- None.
+- Content transaction support for local install, rollback, and verify operations.
+- Installed metadata schema expansion with version history and per-version checksums.
+- Permission grant persistence APIs (`load_permissions`/`save_permissions`) with typed capability grants.
+- `index://` registry provider with cached index fallback and artifact download support.
+- Tarball artifact unpack helper used by index installs.
+- CLI operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`.
+- Shell Installed route action keybindings (`U` update, `B` rollback, `V` verify).
+- Polling hot-load detection for `installed.json` and `games/**/game.json`.
+- New ADR for content transactions and index provider architecture.
 
 ### Changed
 
-- None.
+- Manifest parsing now normalizes mixed legacy/typed permission declarations into typed grants.
+- Installed detail panel actions are now active commands rather than planned placeholders.
+- App runtime now executes content operations through a serialized background worker queue.
 
 ### Fixed
 
-- None.
+- Hot-load refresh and operation completion now synchronize Installed route state without requiring app restart.
 
 ## [0.1.0] - 2026-02-09
 

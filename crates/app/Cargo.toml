@@ -22,5 +22,9 @@ runtime = { path = "../runtime" }
 shell = { path = "../shell" }
 theme = { path = "../theme" }
 
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.17"
+
 [lints]
 workspace = true

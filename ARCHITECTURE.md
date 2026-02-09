@@ -23,13 +23,15 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Framebuffer model
   - Diff renderer
 - `crates/content`
-  - Install/update/remove/verify/rollback pipeline
-  - Cache and local artifact management
-  - Atomic pointer switching
+  - Install/update/verify/rollback transaction pipeline
+  - Local artifact staging and checksum validation
+  - Atomic pointer switching (`games/<id>/current`)
+  - Permissions grant persistence
 - `crates/registry`
   - Registry provider traits
   - Listing/resolve flows
-  - Provider adapters (`builtin://`, `local://`, later remote)
+  - Provider adapters (`builtin://`, `index://`)
+  - Tarball artifact fetch + unpack helpers
 - `crates/plugin-host`
   - Execution type dispatch (`native|wasm|process`)
   - Capability mediation and grant checks
@@ -52,11 +54,14 @@ Policy gates:
 - Long-running operations run in worker tasks with progress events.
 - Shell receives operation state updates through message channels.
 - Backpressure handling is explicit (bounded queues + drop/merge policy for non-critical telemetry).
+- Content operations are serialized (single in-flight install/update/rollback/verify) via a dedicated worker queue.
+- Hot-load refresh uses polling (1s cadence) over installed-state and manifest files.
 
 ## Failure Boundaries
 
 - Shell failures should not corrupt content state.
 - Content transaction failures must not leak partial installs.
+- Content transaction failure path must preserve previous `current` pointer and quarantine partial staging.
 - Registry/provider failures must degrade gracefully and keep local functionality available.
 - Plugin failures are isolated from host process when possible.
 

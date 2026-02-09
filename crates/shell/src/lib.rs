@@ -79,6 +79,9 @@ pub enum ShellCommand {
     RestartGame,
     ToggleFullscreen,
     TogglePause,
+    UpdateInstalled(String),
+    RollbackInstalled(String),
+    VerifyInstalled(String),
     SetOverlay(Option<Overlay>),
     CyclePerformance,
     None,
@@ -525,6 +528,10 @@ impl ShellState {
         self.normalize_list_index();
         let visible = self.visible_game_indices_for_route(&route);
         let len = visible.len().max(1);
+        let selected_id = visible
+            .get(self.list_index.min(visible.len().saturating_sub(1)))
+            .and_then(|idx| self.games.get(*idx))
+            .map(|game| game.id.clone());
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.list_index = (self.list_index + 1) % len;
@@ -546,6 +553,21 @@ impl ShellState {
                 } else {
                     vec![ShellCommand::None]
                 }
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') if matches!(route, Route::Installed) => {
+                selected_id
+                    .map(|id| vec![ShellCommand::UpdateInstalled(id)])
+                    .unwrap_or_else(|| vec![ShellCommand::None])
+            }
+            KeyCode::Char('b') | KeyCode::Char('B') if matches!(route, Route::Installed) => {
+                selected_id
+                    .map(|id| vec![ShellCommand::RollbackInstalled(id)])
+                    .unwrap_or_else(|| vec![ShellCommand::None])
+            }
+            KeyCode::Char('v') | KeyCode::Char('V') if matches!(route, Route::Installed) => {
+                selected_id
+                    .map(|id| vec![ShellCommand::VerifyInstalled(id)])
+                    .unwrap_or_else(|| vec![ShellCommand::None])
             }
             _ => vec![ShellCommand::None],
         }
@@ -910,7 +932,7 @@ fn render_installed(
         |game| {
             let installed = context.installed.get(&game.id).cloned().unwrap_or_default();
             format!(
-                "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- Verify (planned)\n- Rollback (planned)\n- Update (planned)\n\nPress Enter for game detail.",
+                "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- [V] Verify\n- [B] Rollback\n- [U] Update\n\nPress Enter for game detail.",
                 game.name,
                 game.description,
                 if installed.current_version.is_empty() {
@@ -1389,6 +1411,22 @@ mod tests {
         assert!(content.contains(needle), "buffer did not contain {needle}");
     }
 
+    fn assert_buffer_not_contains(buffer: &Buffer, needle: &str) {
+        let mut content = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                content.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+            content.push('\n');
+        }
+
+        assert!(
+            !content.contains(needle),
+            "buffer unexpectedly contained {needle}"
+        );
+    }
+
     fn sample_games() -> Vec<GameItem> {
         vec![
             GameItem {
@@ -1530,8 +1568,46 @@ mod tests {
 
         let buffer = terminal.backend().buffer().clone();
         assert_buffer_contains(&buffer, "Version:");
-        assert_buffer_contains(&buffer, "Verify");
+        assert_buffer_contains(&buffer, "[V] Verify");
+        assert_buffer_not_contains(&buffer, "(planned)");
         Ok(())
+    }
+
+    #[test]
+    fn installed_action_keys_emit_operation_commands() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Installed;
+        state.set_installed_game_ids(vec!["snake-plus".to_string()]);
+
+        let update = state.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            update,
+            vec![ShellCommand::UpdateInstalled("snake-plus".to_string())]
+        );
+
+        let rollback = state.handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            rollback,
+            vec![ShellCommand::RollbackInstalled("snake-plus".to_string())]
+        );
+
+        let verify = state.handle_key(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            verify,
+            vec![ShellCommand::VerifyInstalled("snake-plus".to_string())]
+        );
     }
 
     #[test]

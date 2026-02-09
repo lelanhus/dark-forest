@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -6,7 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
@@ -18,7 +21,9 @@ use diagnostics::{DiagnosticsSnapshot, PerfDiagnostics, detect_terminal_capabili
 use games::builtin_catalog;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use registry::{BuiltinRegistry, RegistryProvider};
+use registry::{
+    BuiltinRegistry, IndexRegistryProvider, RegistryProvider, parse_manifest, unpack_tarball_to_dir,
+};
 use runtime::{
     PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner, load_replay_from_path, run_replay,
 };
@@ -28,12 +33,89 @@ use shell::{GameStatsSummary, InstalledSummary, RenderContext, Route, ShellComma
 enum AppEvent {
     Terminal(CrosstermEvent),
     Tick,
+    OperationCompleted(OperationReport),
+    HotReloadDetected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LaunchMode {
     Interactive,
     Replay { path: PathBuf },
+    Operation(ContentOperation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContentOperation {
+    InstallLocal {
+        artifact_dir: PathBuf,
+        source: Option<String>,
+    },
+    InstallIndex {
+        locator: String,
+        game_id: String,
+        version: Option<String>,
+    },
+    Update {
+        game_id: String,
+    },
+    Rollback {
+        game_id: String,
+    },
+    Verify {
+        game_id: String,
+    },
+}
+
+impl ContentOperation {
+    fn label(&self) -> String {
+        match self {
+            Self::InstallLocal { artifact_dir, .. } => {
+                format!("install-local:{}", artifact_dir.display())
+            }
+            Self::InstallIndex {
+                locator,
+                game_id,
+                version,
+            } => {
+                let suffix = version
+                    .as_ref()
+                    .map(|value| format!("@{value}"))
+                    .unwrap_or_else(|| "@latest".to_string());
+                format!("install-index:{locator}:{game_id}{suffix}")
+            }
+            Self::Update { game_id } => format!("update:{game_id}"),
+            Self::Rollback { game_id } => format!("rollback:{game_id}"),
+            Self::Verify { game_id } => format!("verify:{game_id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OperationReport {
+    operation: String,
+    success: bool,
+    message: String,
+    installed_changed: bool,
+}
+
+impl OperationReport {
+    fn success(operation: &ContentOperation, message: String, installed_changed: bool) -> Self {
+        Self {
+            operation: operation.label(),
+            success: true,
+            message,
+            installed_changed,
+        }
+    }
+
+    fn failure(operation: &ContentOperation, message: String) -> Self {
+        Self {
+            operation: operation.label(),
+            success: false,
+            message,
+            installed_changed: false,
+        }
+    }
 }
 
 struct AppModel {
@@ -49,6 +131,7 @@ struct AppModel {
     current_game_started_at: Option<Instant>,
     seed_counter: u64,
     last_render_at: Instant,
+    builtin_games: Vec<shell::GameItem>,
 }
 
 fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) -> bool {
@@ -68,32 +151,116 @@ fn should_forward_key_to_runner(
 }
 
 fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode> {
-    let mut args = args.into_iter();
-    let mut mode = LaunchMode::Interactive;
+    let args = args.into_iter().collect::<Vec<_>>();
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--replay" => {
-                let path = args
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--replay requires a path argument"))?;
-                mode = LaunchMode::Replay {
-                    path: PathBuf::from(path),
-                };
-            }
-            "--help" | "-h" => {
-                println!("Usage:");
-                println!("  dark-forest                 # interactive shell");
-                println!("  dark-forest --replay <path> # run replay fixture headlessly");
-                std::process::exit(0);
-            }
-            _ => {
-                return Err(anyhow::anyhow!("unknown argument: {arg}"));
-            }
-        }
+    if args.is_empty() {
+        return Ok(LaunchMode::Interactive);
     }
 
-    Ok(mode)
+    match args[0].as_str() {
+        "--help" | "-h" => {
+            println!("Usage:");
+            println!("  dark-forest                                  # interactive shell");
+            println!("  dark-forest --replay <path>                  # run replay fixture");
+            println!("  dark-forest --install-local <dir> [--source <source>]");
+            println!("  dark-forest --install-index <locator> <id> [--version <ver>]");
+            println!("  dark-forest --update <id>");
+            println!("  dark-forest --rollback <id>");
+            println!("  dark-forest --verify <id>");
+            std::process::exit(0);
+        }
+        "--replay" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--replay requires exactly one path argument"));
+            }
+            Ok(LaunchMode::Replay {
+                path: PathBuf::from(&args[1]),
+            })
+        }
+        "--install-local" => {
+            if args.len() < 2 {
+                return Err(anyhow!("--install-local requires an artifact directory"));
+            }
+            let mut source = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--source" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--source requires a value"));
+                        }
+                        source = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --install-local: {other}"));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Operation(ContentOperation::InstallLocal {
+                artifact_dir: PathBuf::from(&args[1]),
+                source,
+            }))
+        }
+        "--install-index" => {
+            if args.len() < 3 {
+                return Err(anyhow!(
+                    "--install-index requires <locator> <id> [--version <ver>]"
+                ));
+            }
+
+            let locator = args[1].clone();
+            let game_id = args[2].clone();
+            let mut version = None;
+            let mut idx = 3;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--version" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--version requires a value"));
+                        }
+                        version = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --install-index: {other}"));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Operation(ContentOperation::InstallIndex {
+                locator,
+                game_id,
+                version,
+            }))
+        }
+        "--update" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--update requires exactly one game id"));
+            }
+            Ok(LaunchMode::Operation(ContentOperation::Update {
+                game_id: args[1].clone(),
+            }))
+        }
+        "--rollback" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--rollback requires exactly one game id"));
+            }
+            Ok(LaunchMode::Operation(ContentOperation::Rollback {
+                game_id: args[1].clone(),
+            }))
+        }
+        "--verify" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--verify requires exactly one game id"));
+            }
+            Ok(LaunchMode::Operation(ContentOperation::Verify {
+                game_id: args[1].clone(),
+            }))
+        }
+        other => Err(anyhow!("unknown argument: {other}")),
+    }
 }
 
 fn run_replay_cli(path: &Path) -> Result<()> {
@@ -109,6 +276,22 @@ fn run_replay_cli(path: &Path) -> Result<()> {
     println!("replay.frame_hash={}", outcome.frame_hash);
 
     Ok(())
+}
+
+fn run_operation_cli(operation: ContentOperation) -> Result<()> {
+    let store = JsonContentStore::create_with_default_root()?;
+    let report = execute_content_operation(store.root().to_path_buf(), operation.clone())
+        .unwrap_or_else(|err| OperationReport::failure(&operation, err.to_string()));
+
+    println!("operation={}", report.operation);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
 }
 
 fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
@@ -130,17 +313,266 @@ fn ensure_builtin_installed(
                 id: game.id.clone(),
                 source: "builtin://dark-forest".to_string(),
                 current_version: "0.1.0".to_string(),
+                installed_versions: vec!["0.1.0".to_string()],
+                version_checksums: BTreeMap::new(),
             });
         }
     }
     installed
 }
 
+fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> shell::GameItem {
+    let manifest_path = root
+        .join("games")
+        .join(&record.id)
+        .join(&record.current_version)
+        .join("game.json");
+
+    if let Ok(raw) = fs::read_to_string(&manifest_path)
+        && let Ok(manifest) = parse_manifest(&raw)
+    {
+        return shell::GameItem {
+            id: manifest.id,
+            name: manifest.name,
+            description: format!("Installed from {}", record.source),
+            tags: vec!["installed".to_string()],
+        };
+    }
+
+    shell::GameItem {
+        id: record.id.clone(),
+        name: record.id.clone(),
+        description: format!("Installed from {}", record.source),
+        tags: vec!["installed".to_string()],
+    }
+}
+
+fn select_unpacked_artifact_root(unpack_dir: &Path) -> Result<PathBuf> {
+    if unpack_dir.join("game.json").exists() {
+        return Ok(unpack_dir.to_path_buf());
+    }
+
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(unpack_dir)? {
+        let path = entry?.path();
+        if path.is_dir() && path.join("game.json").exists() {
+            candidates.push(path);
+        }
+    }
+
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+
+    Err(anyhow!(
+        "unable to locate game.json in unpacked artifact {}",
+        unpack_dir.display()
+    ))
+}
+
+fn parse_manifest_from_artifact_dir(dir: &Path) -> Result<registry::Manifest> {
+    let manifest_path = dir.join("game.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    parse_manifest(&raw)
+}
+
+fn install_from_index(
+    store: &JsonContentStore,
+    locator: &str,
+    game_id: &str,
+    version: Option<String>,
+) -> Result<content::InstallOutcome> {
+    let provider = IndexRegistryProvider::new(locator.to_string(), store.cache_dir_path());
+    let artifact = provider.resolve(game_id, version.as_deref())?;
+    let archive_path = provider.fetch_artifact_to_cache(&artifact)?;
+
+    let unpack_dir = store.root().join("tmp").join(format!(
+        "index-install-{}-{}-{}",
+        game_id,
+        artifact.version,
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+
+    if unpack_dir.exists() {
+        let _ = fs::remove_dir_all(&unpack_dir);
+    }
+    fs::create_dir_all(&unpack_dir)?;
+    unpack_tarball_to_dir(&archive_path, &unpack_dir)?;
+    let artifact_root = select_unpacked_artifact_root(&unpack_dir)?;
+
+    let result = store.install_from_directory(&content::InstallRequest {
+        game_id: game_id.to_string(),
+        version: artifact.version,
+        source: format!("index://{locator}"),
+        artifact_dir: artifact_root,
+        expected_sha256: artifact.checksum_sha256,
+    });
+
+    let _ = fs::remove_dir_all(&unpack_dir);
+    result.map_err(|err| anyhow!(err.to_string()))
+}
+
+fn execute_content_operation(
+    root: PathBuf,
+    operation: ContentOperation,
+) -> Result<OperationReport> {
+    let store = JsonContentStore::new(root);
+    store.ensure_layout()?;
+
+    match operation.clone() {
+        ContentOperation::InstallLocal {
+            artifact_dir,
+            source,
+        } => {
+            let manifest = parse_manifest_from_artifact_dir(&artifact_dir)?;
+            let outcome = store
+                .install_from_directory(&content::InstallRequest {
+                    game_id: manifest.id.clone(),
+                    version: manifest.version.clone(),
+                    source: source.unwrap_or_else(|| "local://manual".to_string()),
+                    artifact_dir,
+                    expected_sha256: None,
+                })
+                .map_err(|err| anyhow!(err.to_string()))?;
+
+            Ok(OperationReport::success(
+                &operation,
+                format!("installed {}@{}", outcome.game_id, outcome.version),
+                true,
+            ))
+        }
+        ContentOperation::InstallIndex {
+            locator,
+            game_id,
+            version,
+        } => {
+            let outcome = install_from_index(&store, &locator, &game_id, version)?;
+            Ok(OperationReport::success(
+                &operation,
+                format!(
+                    "installed {}@{} from index",
+                    outcome.game_id, outcome.version
+                ),
+                true,
+            ))
+        }
+        ContentOperation::Update { game_id } => {
+            let installed = store.load_installed()?;
+            let record = installed
+                .installed
+                .iter()
+                .find(|item| item.id == game_id)
+                .ok_or_else(|| anyhow!("game is not installed: {game_id}"))?;
+
+            let Some(locator) = record.source.strip_prefix("index://") else {
+                return Err(anyhow!(
+                    "update is currently supported only for index:// sources"
+                ));
+            };
+
+            let provider = IndexRegistryProvider::new(locator.to_string(), store.cache_dir_path());
+            let latest = provider.resolve(&game_id, None)?;
+            if latest.version == record.current_version {
+                return Ok(OperationReport::success(
+                    &operation,
+                    format!("{game_id} is already up to date ({})", latest.version),
+                    false,
+                ));
+            }
+
+            let outcome = install_from_index(&store, locator, &game_id, Some(latest.version))?;
+            Ok(OperationReport::success(
+                &operation,
+                format!("updated {} to {}", outcome.game_id, outcome.version),
+                true,
+            ))
+        }
+        ContentOperation::Rollback { game_id } => {
+            let outcome = store
+                .rollback_game(&game_id)
+                .map_err(|err| anyhow!(err.to_string()))?;
+            Ok(OperationReport::success(
+                &operation,
+                format!(
+                    "rolled back {} from {} to {}",
+                    outcome.game_id, outcome.from_version, outcome.to_version
+                ),
+                true,
+            ))
+        }
+        ContentOperation::Verify { game_id } => {
+            let outcome = store
+                .verify_game(&game_id)
+                .map_err(|err| anyhow!(err.to_string()))?;
+
+            if outcome.verified {
+                Ok(OperationReport::success(
+                    &operation,
+                    format!("verified {}@{}", outcome.game_id, outcome.version),
+                    false,
+                ))
+            } else {
+                Ok(OperationReport::failure(
+                    &operation,
+                    format!(
+                        "verification failed for {}@{} (expected {:?}, actual {})",
+                        outcome.game_id,
+                        outcome.version,
+                        outcome.expected_sha256,
+                        outcome.actual_sha256,
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+fn compute_hotload_signature(root: &Path) -> Result<u64> {
+    let mut files = Vec::new();
+    let installed_path = root.join("installed.json");
+    if installed_path.exists() {
+        files.push(installed_path);
+    }
+
+    collect_game_manifests(&root.join("games"), &mut files)?;
+    files.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for path in files {
+        path.hash(&mut hasher);
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+        metadata.len().hash(&mut hasher);
+        let modified = metadata.modified().ok();
+        modified.hash(&mut hasher);
+    }
+
+    Ok(hasher.finish())
+}
+
+fn collect_game_manifests(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_game_manifests(&path, output)?;
+        } else if path.file_name().is_some_and(|name| name == "game.json") {
+            output.push(path);
+        }
+    }
+
+    Ok(())
+}
+
 impl AppModel {
     fn new() -> Result<Self> {
         let listings = builtin_catalog();
         let registry = BuiltinRegistry::new(listings.clone());
-        let games = registry
+        let builtin_games = registry
             .list()?
             .into_iter()
             .map(|listing| shell::GameItem {
@@ -155,11 +587,11 @@ impl AppModel {
         store.ensure_layout()?;
         let settings = store.load_settings()?;
         let play_history = store.load_play_history()?;
-        let installed = ensure_builtin_installed(store.load_installed()?, &games);
+        let installed = ensure_builtin_installed(store.load_installed()?, &builtin_games);
         let _ = store.save_installed(&installed);
         let mut best_scores = BTreeMap::new();
 
-        for game in &games {
+        for game in &builtin_games {
             if let Ok(scores) = store.load_high_scores(&game.id)
                 && let Some(best) = scores.entries.first()
             {
@@ -177,17 +609,11 @@ impl AppModel {
         };
         runner.set_perf_mode(perf_mode);
 
-        let mut shell = ShellState::new(games);
+        let mut shell = ShellState::new(builtin_games.clone());
         shell.continue_game_id = latest_played_game_id(&play_history);
-        shell.set_installed_game_ids(
-            installed
-                .installed
-                .iter()
-                .map(|item| item.id.clone())
-                .collect(),
-        );
+        shell.performance_mode = settings.performance_mode.clone();
 
-        Ok(Self {
+        let mut model = Self {
             shell,
             runner,
             store,
@@ -200,12 +626,61 @@ impl AppModel {
             current_game_started_at: None,
             seed_counter: Utc::now().timestamp() as u64,
             last_render_at: Instant::now(),
-        })
+            builtin_games,
+        };
+
+        model.refresh_game_catalog();
+        Ok(model)
     }
 
     fn next_seed(&mut self) -> u64 {
         self.seed_counter = self.seed_counter.saturating_add(1);
         self.seed_counter
+    }
+
+    fn refresh_game_catalog(&mut self) {
+        let mut merged = self.builtin_games.clone();
+
+        for record in &self.installed.installed {
+            if merged.iter().any(|game| game.id == record.id) {
+                continue;
+            }
+            merged.push(read_installed_game_item(self.store.root(), record));
+        }
+
+        self.shell.games = merged;
+        self.shell.set_installed_game_ids(
+            self.installed
+                .installed
+                .iter()
+                .map(|item| item.id.clone())
+                .collect(),
+        );
+    }
+
+    fn refresh_installed_state(&mut self) -> bool {
+        let previous_active_version = self.current_game_id.as_ref().and_then(|id| {
+            self.installed
+                .installed
+                .iter()
+                .find(|item| &item.id == id)
+                .map(|item| item.current_version.clone())
+        });
+
+        if let Ok(installed) = self.store.load_installed() {
+            self.installed = installed;
+            self.refresh_game_catalog();
+        }
+
+        let next_active_version = self.current_game_id.as_ref().and_then(|id| {
+            self.installed
+                .installed
+                .iter()
+                .find(|item| &item.id == id)
+                .map(|item| item.current_version.clone())
+        });
+
+        previous_active_version.is_some() && previous_active_version != next_active_version
     }
 
     fn cycle_performance_mode(&mut self) {
@@ -243,7 +718,9 @@ impl AppModel {
                     .unwrap_or_else(Instant::now);
                 self.shell.push_notification(format!("Started {game_id}"));
             }
-            Err(err) => self.shell.set_error(format!("unknown game: {err}")),
+            Err(err) => self.shell.set_error(format!(
+                "unable to start game ({game_id}): {err}. Third-party execution is not enabled yet"
+            )),
         }
     }
 
@@ -308,7 +785,10 @@ impl AppModel {
             ShellCommand::TogglePause => self.runner.toggle_pause(),
             ShellCommand::SetOverlay(overlay) => self.shell.overlay = overlay,
             ShellCommand::CyclePerformance => self.cycle_performance_mode(),
-            ShellCommand::None => {}
+            ShellCommand::UpdateInstalled(_)
+            | ShellCommand::RollbackInstalled(_)
+            | ShellCommand::VerifyInstalled(_)
+            | ShellCommand::None => {}
         }
 
         false
@@ -333,6 +813,26 @@ impl AppModel {
                     .unwrap_or(Route::Library);
                 self.shell.set_error(format!("Game crashed: {err}"));
             }
+        }
+    }
+
+    fn apply_operation_report(&mut self, report: OperationReport) {
+        if !self.shell.progress.is_empty() {
+            let _ = self.shell.progress.remove(0);
+        }
+
+        if report.success {
+            self.shell.push_notification(report.message);
+            if report.installed_changed {
+                let active_changed = self.refresh_installed_state();
+                if active_changed {
+                    self.shell
+                        .push_notification("Active game content changed. Restart to apply.");
+                }
+            }
+        } else {
+            self.shell
+                .set_error(format!("{} failed: {}", report.operation, report.message));
         }
     }
 
@@ -416,6 +916,28 @@ impl AppModel {
     }
 }
 
+fn enqueue_operation(
+    shell: &mut ShellState,
+    tx: &tokio::sync::mpsc::Sender<ContentOperation>,
+    operation: ContentOperation,
+) {
+    let label = operation.label();
+    match tx.try_send(operation) {
+        Ok(()) => {
+            shell.progress.push(format!("Running: {label}"));
+            if shell.progress.len() > 5 {
+                let _ = shell.progress.remove(0);
+            }
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            shell.set_error("operation queue is full; try again");
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            shell.set_error("operation worker unavailable");
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -426,6 +948,7 @@ async fn main() -> Result<()> {
     match parse_launch_mode(std::env::args().skip(1))? {
         LaunchMode::Interactive => run().await,
         LaunchMode::Replay { path } => run_replay_cli(&path),
+        LaunchMode::Operation(operation) => run_operation_cli(operation),
     }
 }
 
@@ -451,6 +974,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     let mut model = AppModel::new()?;
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
+    let (operation_tx, mut operation_rx) = tokio::sync::mpsc::channel::<ContentOperation>(32);
     let running = Arc::new(AtomicBool::new(true));
 
     let input_running = Arc::clone(&running);
@@ -492,6 +1016,53 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
         }
     });
 
+    let operation_running = Arc::clone(&running);
+    let operation_event_tx = event_tx.clone();
+    let operation_root = model.store.root().to_path_buf();
+    let operation_task = tokio::spawn(async move {
+        while operation_running.load(Ordering::SeqCst) {
+            let Some(operation) = operation_rx.recv().await else {
+                break;
+            };
+
+            let operation_for_error = operation.clone();
+            let root = operation_root.clone();
+            let result =
+                tokio::task::spawn_blocking(move || execute_content_operation(root, operation))
+                    .await;
+
+            let report = match result {
+                Ok(Ok(report)) => report,
+                Ok(Err(err)) => OperationReport::failure(&operation_for_error, err.to_string()),
+                Err(join_err) => OperationReport::failure(
+                    &operation_for_error,
+                    format!("operation task failed: {join_err}"),
+                ),
+            };
+
+            let _ = operation_event_tx
+                .send(AppEvent::OperationCompleted(report))
+                .await;
+        }
+    });
+
+    let watch_running = Arc::clone(&running);
+    let watch_tx = event_tx.clone();
+    let watch_root = model.store.root().to_path_buf();
+    let watch_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut last_signature = compute_hotload_signature(&watch_root).ok();
+
+        while watch_running.load(Ordering::SeqCst) {
+            interval.tick().await;
+            let next_signature = compute_hotload_signature(&watch_root).ok();
+            if next_signature.is_some() && next_signature != last_signature {
+                last_signature = next_signature;
+                let _ = watch_tx.try_send(AppEvent::HotReloadDetected);
+            }
+        }
+    });
+
     let mut should_quit = false;
     while !should_quit {
         if let Some(event) = event_rx.recv().await {
@@ -510,6 +1081,16 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                         model.shell.route = Route::GameDetail {
                             id: previous_game_id.unwrap_or_else(|| "unknown".to_string()),
                         };
+                    }
+                }
+                AppEvent::OperationCompleted(report) => {
+                    model.apply_operation_report(report);
+                }
+                AppEvent::HotReloadDetected => {
+                    if model.refresh_installed_state() {
+                        model.shell.push_notification(
+                            "Installed content changed. Restart active game to apply.",
+                        );
                     }
                 }
                 AppEvent::Terminal(event) => match event {
@@ -534,8 +1115,27 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                         );
 
                         for command in commands {
-                            if model.handle_shell_command(command) {
-                                should_quit = true;
+                            match command {
+                                ShellCommand::UpdateInstalled(id) => enqueue_operation(
+                                    &mut model.shell,
+                                    &operation_tx,
+                                    ContentOperation::Update { game_id: id },
+                                ),
+                                ShellCommand::RollbackInstalled(id) => enqueue_operation(
+                                    &mut model.shell,
+                                    &operation_tx,
+                                    ContentOperation::Rollback { game_id: id },
+                                ),
+                                ShellCommand::VerifyInstalled(id) => enqueue_operation(
+                                    &mut model.shell,
+                                    &operation_tx,
+                                    ContentOperation::Verify { game_id: id },
+                                ),
+                                other => {
+                                    if model.handle_shell_command(other) {
+                                        should_quit = true;
+                                    }
+                                }
                             }
                         }
 
@@ -570,6 +1170,8 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     running.store(false, Ordering::SeqCst);
     let _ = input_task.await;
     let _ = tick_task.await;
+    let _ = watch_task.await;
+    let _ = operation_task.await;
 
     model.update_play_stats();
     model.store.save_settings(&model.settings)?;
@@ -595,9 +1197,13 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use content::ContentStore;
     use shell::{Overlay, Route, ShellCommand};
 
-    use super::{LaunchMode, parse_launch_mode, should_forward_key_to_runner, should_render_frame};
+    use super::{
+        ContentOperation, LaunchMode, compute_hotload_signature, execute_content_operation,
+        parse_launch_mode, should_forward_key_to_runner, should_render_frame,
+    };
 
     #[test]
     fn render_scheduler_waits_until_target_duration() {
@@ -629,6 +1235,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_install_local_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--install-local".to_string(),
+            "/tmp/game".to_string(),
+            "--source".to_string(),
+            "local://fixtures".to_string(),
+        ])
+        .expect("install-local mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Operation(ContentOperation::InstallLocal {
+                artifact_dir: PathBuf::from("/tmp/game"),
+                source: Some("local://fixtures".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_install_index_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--install-index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "snake-plus".to_string(),
+            "--version".to_string(),
+            "0.2.0".to_string(),
+        ])
+        .expect("install-index mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Operation(ContentOperation::InstallIndex {
+                locator: "file:///tmp/index.json".to_string(),
+                game_id: "snake-plus".to_string(),
+                version: Some("0.2.0".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn rejects_unknown_launch_argument() {
         let error = parse_launch_mode(vec!["--nope".to_string()]);
         assert!(error.is_err());
@@ -654,5 +1300,102 @@ mod tests {
             None,
             true
         ));
+    }
+
+    #[test]
+    fn hotload_signature_changes_when_installed_changes() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = content::JsonContentStore::new(temp.path().to_path_buf());
+        store.ensure_layout()?;
+
+        let before = compute_hotload_signature(store.root())?;
+        let mut installed = store.load_installed()?;
+        installed.installed.push(content::InstalledRecord {
+            id: "sample-game".to_string(),
+            source: "local://fixture".to_string(),
+            current_version: "0.1.0".to_string(),
+            installed_versions: vec!["0.1.0".to_string()],
+            version_checksums: std::collections::BTreeMap::new(),
+        });
+        store.save_installed(&installed)?;
+        let after = compute_hotload_signature(store.root())?;
+
+        assert_ne!(before, after);
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_operation_effects_current_pointer() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let artifact_v1 = root.join("artifact-v1");
+        let artifact_v2 = root.join("artifact-v2");
+        std::fs::create_dir_all(&artifact_v1)?;
+        std::fs::create_dir_all(&artifact_v2)?;
+
+        std::fs::write(
+            artifact_v1.join("game.json"),
+            serde_json::json!({
+                "id": "snake-plus",
+                "name": "Snake+",
+                "version": "0.1.0",
+                "author": "Dark Forest",
+                "entry_type": "wasm",
+                "entry": "main.wasm",
+                "host_api": "^0.1",
+                "permissions": ["terminal.raw_input"]
+            })
+            .to_string(),
+        )?;
+        std::fs::write(artifact_v1.join("main.wasm"), b"v1")?;
+
+        std::fs::write(
+            artifact_v2.join("game.json"),
+            serde_json::json!({
+                "id": "snake-plus",
+                "name": "Snake+",
+                "version": "0.2.0",
+                "author": "Dark Forest",
+                "entry_type": "wasm",
+                "entry": "main.wasm",
+                "host_api": "^0.1",
+                "permissions": ["terminal.raw_input"]
+            })
+            .to_string(),
+        )?;
+        std::fs::write(artifact_v2.join("main.wasm"), b"v2")?;
+
+        let install1 = execute_content_operation(
+            root.clone(),
+            ContentOperation::InstallLocal {
+                artifact_dir: artifact_v1,
+                source: Some("local://fixture".to_string()),
+            },
+        )?;
+        assert!(install1.success);
+
+        let install2 = execute_content_operation(
+            root.clone(),
+            ContentOperation::InstallLocal {
+                artifact_dir: artifact_v2,
+                source: Some("local://fixture".to_string()),
+            },
+        )?;
+        assert!(install2.success);
+
+        let rollback = execute_content_operation(
+            root.clone(),
+            ContentOperation::Rollback {
+                game_id: "snake-plus".to_string(),
+            },
+        )?;
+        assert!(rollback.success);
+
+        let store = content::JsonContentStore::new(root);
+        assert_eq!(
+            store.read_current_pointer("snake-plus"),
+            Some("0.1.0".to_string())
+        );
+        Ok(())
     }
 }

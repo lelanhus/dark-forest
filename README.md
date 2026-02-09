@@ -18,6 +18,16 @@ Implemented in `v0.1.0`:
 - Local persistence under `~/.dark-forest/` for settings, play history, installed records, and high scores.
 - Replay harness and headless replay execution mode.
 
+Implemented post-`v0.1.0` (current workspace):
+
+- Content transaction pipeline for local installs (`tmp -> verify -> atomic move -> current pointer -> metadata commit`).
+- Rollback and verify operations over installed versions.
+- `index://` remote registry provider with local cache fallback.
+- Remote artifact download, checksum validation, and tarball unpack support.
+- Background operation queue from the shell for Installed actions (`U` update, `B` rollback, `V` verify).
+- Polling-based hot-load refresh over `installed.json` and `games/**/game.json`.
+- Manifest permission normalization from legacy strings to typed capability grants.
+
 ## Running
 
 Interactive shell:
@@ -30,6 +40,16 @@ Headless replay mode:
 
 ```bash
 cargo run -p dark-forest -- --replay fixtures/replays/snake-seed-12345.json
+```
+
+Content operations:
+
+```bash
+cargo run -p dark-forest -- --install-local /path/to/unpacked-game
+cargo run -p dark-forest -- --install-index file:///path/to/index.json snake-plus --version 0.2.0
+cargo run -p dark-forest -- --update snake-plus
+cargo run -p dark-forest -- --rollback snake-plus
+cargo run -p dark-forest -- --verify snake-plus
 ```
 
 ## Release Artifacts (v0.1.0)
@@ -47,9 +67,9 @@ Tag-driven release builds publish:
 - `crates/shell`: routes, overlays, layout rendering, keymaps.
 - `crates/runtime`: game contracts, event dispatch, timing, diff renderer, replay engine.
 - `crates/games`: built-in native games.
-- `crates/content`: JSON persistence and atomic writes.
-- `crates/registry`: listing/resolution interfaces (builtin provider active in v0.1).
-- `crates/plugin-host`: entry types and capability model scaffolding.
+- `crates/content`: JSON persistence, install transactions, rollback/verify, and permissions grant storage.
+- `crates/registry`: builtin and `index://` providers, manifest normalization, artifact fetch/unpack helpers.
+- `crates/plugin-host`: entry types and capability model contracts used by manifest normalization.
 - `crates/theme`: Forge theme tokens and style helpers.
 - `crates/diagnostics`: terminal and render diagnostics.
 

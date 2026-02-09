@@ -17,6 +17,7 @@ Paths must be resolved through a platform abstraction. Do not hardcode separator
 
 - Every persisted top-level document must include a `schema_version`.
 - Schema upgrades must be forward-planned and backward-safe within a major release line.
+- Current runtime schema baseline is `2` (installed-version history + typed permission grants).
 - Breaking schema changes require:
   - ADR
   - migration plan
@@ -53,17 +54,17 @@ Purpose: installation state for one game id.
 Fields:
 
 - `id: String`
-- `installed_versions: Vec<VersionRecord>`
+- `installed_versions: Vec<SemVer>`
 - `current_version: SemVer`
 - `source_ref: SourceRef`
-- `installed_at: Timestamp`
-- `updated_at: Timestamp`
+- `version_checksums: Map<SemVer, Sha256Hex>`
 
 Invariants:
 
 - `current_version` must exist in `installed_versions`.
 - `installed_versions` must not contain duplicates.
 - State must remain valid under interrupted installs.
+- `version_checksums[current_version]` should exist for externally fetched artifacts when hash data is available.
 
 ## PlayHistory
 
@@ -168,6 +169,7 @@ Validation rules:
 - Unknown required fields are errors.
 - Unknown optional extension fields are ignored unless policy says otherwise.
 - Third-party native entry declarations must be rejected by policy unless explicitly trusted source rules allow them.
+- `permissions` accepts legacy string labels and typed capability objects; host normalizes into typed grants.
 
 ## Integrity and Atomicity Requirements
 

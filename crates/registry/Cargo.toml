@@ -8,13 +8,18 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flate2 = "1.1"
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+tar = "0.4"
+tracing.workspace = true
 plugin-host = { path = "../plugin-host" }
 
 [dev-dependencies]
 proptest = "1.6"
+tempfile = "3.17"
 
 [lints]
 workspace = true
