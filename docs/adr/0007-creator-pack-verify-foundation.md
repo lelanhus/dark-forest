@@ -25,7 +25,8 @@ registry/runtime code paths that solve different problems.
 2. Add CLI entrypoints in `crates/app`:
    - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
    - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
-   - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]` (local index only)
+   - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
+     (local index only)
 3. `pack` produces:
    - deterministic `.tar.gz` artifact with stable lexical file ordering
    - normalized archive header fields for byte-repeatability
@@ -36,7 +37,9 @@ registry/runtime code paths that solve different problems.
    - unpacked `game.json` identity/compat fields match metadata (`id`, `version`, `entry_type`, `host_api`)
 5. `publish` consumes verified artifacts + metadata, stages artifacts into the target local index
    directory, and upserts index catalog entries for game/version.
-6. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
+6. `publish --dry-run` computes and reports publish effects without mutating artifact/index files.
+7. `publish --replace` explicitly allows replacing an existing game/version entry when checksums differ.
+8. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
 
 ## Alternatives Considered
 

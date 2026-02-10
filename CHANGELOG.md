@@ -12,7 +12,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - New creator CLI modes:
   - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
   - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
-  - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]`
+  - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
 - Deterministic `.tar.gz` packaging flow with normalized archive headers and stable file ordering.
 - Creator metadata sidecar JSON for packaged artifacts:
   - `schema_version`
@@ -26,6 +26,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - `generated_at`
 - Local index publish flow that stages artifact files near the target index and upserts catalog
   game/version entries.
+- Publish controls for dry-run planning and explicit replacement of existing version artifacts when
+  checksums differ.
 
 ### Changed
 
