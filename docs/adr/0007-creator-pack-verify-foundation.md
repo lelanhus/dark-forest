@@ -45,6 +45,9 @@ registry/runtime code paths that solve different problems.
 8. `dev` orchestrates pack/verify/publish as a single command and supports watch mode using
    game-directory signatures to trigger repeat cycles.
 9. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
+10. `publish` enforces marketplace quality gates before any index/artifact mutation:
+    - manifest must declare a `permissions` field (array form)
+    - manifest `host_api` semver range must match host API `0.1.0`
 
 ## Alternatives Considered
 
@@ -75,6 +78,7 @@ Operational impact:
 
 - `README.md`, `ROADMAP.md`, and `DATA_MODEL.md` must track creator metadata + CLI behavior.
 - Local publish flow reuses creator metadata instead of recomputing package facts.
+- Creator templates and hot-reload docs are tracked in `templates/` + `docs/CREATOR_WORKFLOW.md`.
 
 ## Validation
 
@@ -86,4 +90,4 @@ Operational impact:
 ## Follow-up
 
 - Define signing model and verification extensions for marketplace trust requirements.
-- Add creator templates and scaffolding flow to complete remaining `M7` exit criteria.
+- Evaluate interactive shell creator routes after CLI creator workflows.

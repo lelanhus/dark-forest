@@ -389,6 +389,7 @@ dependencies = [
  "flate2",
  "plugin-host",
  "registry",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

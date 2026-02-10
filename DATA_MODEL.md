@@ -199,6 +199,8 @@ Validation rules:
 - Unknown optional extension fields are ignored unless policy says otherwise.
 - Third-party native entry declarations must be rejected by policy unless explicitly trusted source rules allow them.
 - `permissions` accepts legacy string labels and typed capability objects; host normalizes into typed grants.
+- Creator `publish` requires the `permissions` field to be explicitly declared (array, may be empty).
+- Creator `publish` requires `host_api` to parse as a semver range compatible with host API `0.1.0`.
 
 ## Registry Index Catalog (`index.json`)
 
@@ -230,6 +232,11 @@ Top-level fields:
 - `entry_type: EntryType` (optional override)
 - `host_api: SemVerRange` (optional override)
 - `permissions: Vec<PermissionDecl>` (legacy string or typed object)
+
+Invariants:
+
+- `host_api_range`/`host_api` values must parse as semver ranges.
+- Creator-authored entries are accepted only when `host_api` is compatible with host API `0.1.0`.
 
 ## Creator Artifact Metadata (`*.metadata.json`)
 

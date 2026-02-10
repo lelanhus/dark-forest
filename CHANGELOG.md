@@ -33,10 +33,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   checksums differ.
 - Creator dev loop API + CLI workflow that runs pack/verify/publish as one cycle or watches for
   local file changes and repeats automatically.
+- Marketplace publish quality gates:
+  - reject manifests that do not declare a `permissions` field
+  - reject manifests whose `host_api` range is incompatible with host API `0.1.0`
+- Starter creator template scaffold at `templates/wasm-basic`.
+- Creator hot-reload documentation in `docs/CREATOR_WORKFLOW.md`.
 
 ### Changed
 
-- Roadmap milestone `M7` status moved from pending to in-progress with creator pack/verify/publish foundation delivered.
+- Roadmap milestone `M7` status moved to complete for creator pack/verify/publish/dev plus
+  template docs and marketplace quality gates.
 
 ## [1.0.0] - 2026-02-10
 

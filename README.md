@@ -39,6 +39,9 @@ Implemented post-`v0.1.0` (current workspace):
 - Install/update permission reconciliation that drops grants no longer declared by manifest.
 - Creator tooling foundation: deterministic packaging and artifact verification (`--pack`, `--verify-artifact`).
 - Local registry publish workflow from creator artifacts (`--publish`).
+- Creator dev workflow (`--dev`) with watch-mode rebuild/publish loops and documented starter
+  template path.
+- Marketplace publish quality gates for declared permissions and host API compatibility.
 
 ## Running
 
@@ -95,6 +98,9 @@ cargo run -p dark-forest -- --dev /path/to/game-dir --index file:///tmp/index.js
 cargo run -p dark-forest -- --dev /path/to/game-dir --index file:///tmp/index.json --watch --interval-ms 500
 ```
 
+Creator template + hot-reload workflow guide:
+`docs/CREATOR_WORKFLOW.md` (`templates/wasm-basic` starter scaffold).
+
 ## Release Artifacts (v1.0.0)
 
 Tag-driven release builds publish:
@@ -116,7 +122,7 @@ Tag-driven release builds publish:
 - `crates/theme`: Forge theme tokens and style helpers.
 - `crates/diagnostics`: terminal and render diagnostics.
 - `crates/creator`: deterministic creator packaging (`pack`), artifact verification
-  (`verify-artifact`), and local index publication (`publish`).
+  (`verify-artifact`), local index publication (`publish`), and creator dev loop (`dev`).
 
 ## Quality Standards
 
