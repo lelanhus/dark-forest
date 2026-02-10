@@ -37,6 +37,7 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Artifact metadata generation and serialization
   - Artifact verification against metadata + embedded manifest
   - Local index publication flow (`publish`) for creator artifacts
+  - Creator dev-cycle orchestration (`dev`) for pack/verify/publish loops
 - `crates/plugin-host`
   - Execution type dispatch (`native|wasm|process`)
   - Wasmtime adapter for `entry_type=wasm`

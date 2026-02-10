@@ -154,6 +154,7 @@ Delivered so far:
 - CLI artifact verification workflow via `--verify-artifact`.
 - CLI local index publish workflow via `--publish`.
 - Publish ergonomics: `--dry-run` planning and `--replace` for explicit version replacement.
+- CLI creator dev workflow via `--dev` (single cycle and watch mode).
 - `crates/creator` boundary introduced for creator-tooling APIs.
 
 Dependencies:

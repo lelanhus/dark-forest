@@ -64,6 +64,23 @@ pub struct PublishOutcome {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevRequest {
+    pub game_dir: PathBuf,
+    pub out: Option<PathBuf>,
+    pub metadata_out: Option<PathBuf>,
+    pub index_locator: String,
+    pub dry_run_publish: bool,
+    pub replace_existing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevCycleOutcome {
+    pub pack: PackOutcome,
+    pub verify: VerifyOutcome,
+    pub publish: PublishOutcome,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageMetadata {
     pub schema_version: u32,
@@ -371,6 +388,52 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         replaced_existing_version,
         dry_run: request.dry_run,
     })
+}
+
+pub fn run_dev_cycle(request: &DevRequest) -> Result<DevCycleOutcome> {
+    let pack = pack_game(&PackRequest {
+        game_dir: request.game_dir.clone(),
+        out: request.out.clone(),
+        metadata_out: request.metadata_out.clone(),
+    })?;
+    let verify = verify_artifact(&VerifyRequest {
+        artifact_path: pack.artifact_path.clone(),
+        metadata_path: Some(pack.metadata_path.clone()),
+    })?;
+    let publish = publish_to_index(&PublishRequest {
+        artifact_path: pack.artifact_path.clone(),
+        metadata_path: Some(pack.metadata_path.clone()),
+        index_locator: request.index_locator.clone(),
+        dry_run: request.dry_run_publish,
+        replace_existing: request.replace_existing,
+    })?;
+    Ok(DevCycleOutcome {
+        pack,
+        verify,
+        publish,
+    })
+}
+
+pub fn game_dir_signature(game_dir: &Path) -> Result<String> {
+    if !game_dir.exists() || !game_dir.is_dir() {
+        return Err(anyhow!("game directory is invalid: {}", game_dir.display()));
+    }
+
+    let mut files = Vec::new();
+    collect_regular_files(game_dir, game_dir, &mut files)?;
+    files.sort_by_key(|path| normalize_relative_path(path));
+
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let relative_normalized = normalize_relative_path(&relative);
+        hasher.update(relative_normalized.as_bytes());
+        hasher.update([0_u8]);
+        let bytes = fs::read(game_dir.join(&relative))
+            .with_context(|| format!("failed to read {}", game_dir.join(&relative).display()))?;
+        hasher.update(bytes);
+    }
+
+    Ok(to_hex_lower(&hasher.finalize()))
 }
 
 pub fn default_artifact_path(game_id: &str, version: &str) -> PathBuf {
@@ -703,8 +766,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        PackRequest, PublishRequest, VerifyRequest, default_artifact_path, default_metadata_path,
-        pack_game, publish_to_index, verify_artifact,
+        DevRequest, PackRequest, PublishRequest, VerifyRequest, default_artifact_path,
+        default_metadata_path, game_dir_signature, pack_game, publish_to_index, run_dev_cycle,
+        verify_artifact,
     };
 
     static TEST_CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1177,6 +1241,43 @@ mod tests {
             .expect("checksum must be present");
         assert_ne!(checksum, pack_v1.metadata.artifact_sha256);
         assert_eq!(checksum, pack_v2.metadata.artifact_sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn run_dev_cycle_packs_verifies_and_publishes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let index_path = temp.path().join("registry").join("index.json");
+
+        let outcome = run_dev_cycle(&DevRequest {
+            game_dir,
+            out: Some(temp.path().join("dist").join("sample-game-1.2.3.tar.gz")),
+            metadata_out: Some(
+                temp.path()
+                    .join("dist")
+                    .join("sample-game-1.2.3.metadata.json"),
+            ),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run_publish: false,
+            replace_existing: false,
+        })?;
+
+        assert_eq!(outcome.pack.metadata.game_id, "sample-game");
+        assert_eq!(outcome.verify.game_id, "sample-game");
+        assert_eq!(outcome.publish.game_id, "sample-game");
+        assert!(index_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn game_dir_signature_changes_when_content_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let before = game_dir_signature(&game_dir)?;
+        write_wasm_payload(&game_dir, b"changed payload bytes")?;
+        let after = game_dir_signature(&game_dir)?;
+        assert_ne!(before, after);
         Ok(())
     }
 }

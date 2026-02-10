@@ -13,7 +13,8 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
 use creator::{
-    PackRequest, PublishRequest, VerifyRequest, pack_game, publish_to_index, verify_artifact,
+    DevRequest, PackRequest, PublishRequest, VerifyRequest, game_dir_signature, pack_game,
+    publish_to_index, run_dev_cycle, verify_artifact,
 };
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use crossterm::terminal::{
@@ -92,6 +93,16 @@ enum CreatorCommand {
         dry_run: bool,
         replace_existing: bool,
     },
+    Dev {
+        game_dir: PathBuf,
+        out: Option<PathBuf>,
+        metadata_out: Option<PathBuf>,
+        index_locator: String,
+        watch: bool,
+        interval_ms: u64,
+        dry_run_publish: bool,
+        replace_existing: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +161,7 @@ impl CreatorCommand {
             Self::Pack { .. } => "pack",
             Self::VerifyArtifact { .. } => "verify-artifact",
             Self::Publish { .. } => "publish",
+            Self::Dev { .. } => "dev",
         }
     }
 }
@@ -202,6 +214,8 @@ impl CreatorCommandReport {
             created_version: None,
             replaced_existing_version: None,
             dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
         }
     }
 
@@ -221,6 +235,8 @@ impl CreatorCommandReport {
             created_version: None,
             replaced_existing_version: None,
             dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
         }
     }
 
@@ -245,6 +261,40 @@ impl CreatorCommandReport {
             created_version: Some(outcome.created_version),
             replaced_existing_version: Some(outcome.replaced_existing_version),
             dry_run: Some(outcome.dry_run),
+            watch_mode: None,
+            dev_cycles: None,
+        }
+    }
+
+    fn success_dev(outcome: creator::DevCycleOutcome, watch_mode: bool, dev_cycles: u64) -> Self {
+        let message = if watch_mode {
+            format!(
+                "dev cycle {} completed for {}@{}",
+                dev_cycles, outcome.publish.game_id, outcome.publish.version
+            )
+        } else {
+            format!(
+                "dev cycle completed for {}@{}",
+                outcome.publish.game_id, outcome.publish.version
+            )
+        };
+        Self {
+            command: "dev".to_string(),
+            success: true,
+            message,
+            artifact_path: Some(outcome.pack.artifact_path),
+            metadata_path: Some(outcome.pack.metadata_path),
+            game_id: Some(outcome.publish.game_id),
+            version: Some(outcome.publish.version),
+            artifact_sha256: Some(outcome.verify.artifact_sha256),
+            artifact_size_bytes: Some(outcome.verify.artifact_size_bytes),
+            index_path: Some(outcome.publish.index_path),
+            created_game: Some(outcome.publish.created_game),
+            created_version: Some(outcome.publish.created_version),
+            replaced_existing_version: Some(outcome.publish.replaced_existing_version),
+            dry_run: Some(outcome.publish.dry_run),
+            watch_mode: Some(watch_mode),
+            dev_cycles: Some(dev_cycles),
         }
     }
 
@@ -264,6 +314,8 @@ impl CreatorCommandReport {
             created_version: None,
             replaced_existing_version: None,
             dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
         }
     }
 }
@@ -300,6 +352,8 @@ struct CreatorCommandReport {
     created_version: Option<bool>,
     replaced_existing_version: Option<bool>,
     dry_run: Option<bool>,
+    watch_mode: Option<bool>,
+    dev_cycles: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -465,6 +519,9 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             );
             println!(
                 "  dark-forest --publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]"
+            );
+            println!(
+                "  dark-forest --dev <game_dir> --index <locator> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>] [--watch] [--interval-ms <ms>] [--dry-run] [--replace]"
             );
             std::process::exit(0);
         }
@@ -749,6 +806,87 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 replace_existing,
             }))
         }
+        "--dev" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--dev requires <game_dir> --index <locator> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>] [--watch] [--interval-ms <ms>] [--dry-run] [--replace]"
+                ));
+            }
+
+            let mut out = None;
+            let mut metadata_out = None;
+            let mut index_locator = None;
+            let mut watch = false;
+            let mut interval_ms = 1_000_u64;
+            let mut dry_run_publish = false;
+            let mut replace_existing = false;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--out" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--out requires a value"));
+                        }
+                        out = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--metadata-out" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--metadata-out requires a value"));
+                        }
+                        metadata_out = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--index" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--index requires a value"));
+                        }
+                        index_locator = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--watch" => {
+                        watch = true;
+                        idx += 1;
+                    }
+                    "--interval-ms" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--interval-ms requires a value"));
+                        }
+                        interval_ms = args[idx + 1]
+                            .parse::<u64>()
+                            .map_err(|_| anyhow!("--interval-ms must be a positive integer"))?;
+                        if interval_ms == 0 {
+                            return Err(anyhow!("--interval-ms must be greater than zero"));
+                        }
+                        idx += 2;
+                    }
+                    "--dry-run" => {
+                        dry_run_publish = true;
+                        idx += 1;
+                    }
+                    "--replace" => {
+                        replace_existing = true;
+                        idx += 1;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --dev: {other}"));
+                    }
+                }
+            }
+
+            let index_locator =
+                index_locator.ok_or_else(|| anyhow!("--dev requires --index <locator>"))?;
+            Ok(LaunchMode::Creator(CreatorCommand::Dev {
+                game_dir: PathBuf::from(&args[1]),
+                out,
+                metadata_out,
+                index_locator,
+                watch,
+                interval_ms,
+                dry_run_publish,
+                replace_existing,
+            }))
+        }
         other => Err(anyhow!("unknown argument: {other}")),
     }
 }
@@ -824,13 +962,92 @@ fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandRepo
             })?;
             Ok(CreatorCommandReport::success_publish(outcome))
         }
+        CreatorCommand::Dev {
+            game_dir,
+            out,
+            metadata_out,
+            index_locator,
+            watch: _watch,
+            interval_ms: _interval_ms,
+            dry_run_publish,
+            replace_existing,
+        } => {
+            let outcome = run_dev_cycle(&DevRequest {
+                game_dir,
+                out,
+                metadata_out,
+                index_locator,
+                dry_run_publish,
+                replace_existing,
+            })?;
+            Ok(CreatorCommandReport::success_dev(outcome, false, 1))
+        }
     }
 }
 
 fn run_creator_cli(command: CreatorCommand) -> Result<()> {
+    if let CreatorCommand::Dev {
+        game_dir,
+        out,
+        metadata_out,
+        index_locator,
+        watch,
+        interval_ms,
+        dry_run_publish,
+        replace_existing,
+    } = &command
+        && *watch
+    {
+        let mut cycles = 0_u64;
+        let mut last_signature = game_dir_signature(game_dir)?;
+
+        let first = run_dev_cycle(&DevRequest {
+            game_dir: game_dir.clone(),
+            out: out.clone(),
+            metadata_out: metadata_out.clone(),
+            index_locator: index_locator.clone(),
+            dry_run_publish: *dry_run_publish,
+            replace_existing: *replace_existing,
+        })?;
+        cycles += 1;
+        let first_report = CreatorCommandReport::success_dev(first, true, cycles);
+        print_creator_report(&first_report);
+
+        loop {
+            std::thread::sleep(Duration::from_millis(*interval_ms));
+            let signature = game_dir_signature(game_dir)?;
+            if signature == last_signature {
+                continue;
+            }
+            last_signature = signature;
+
+            let cycle = run_dev_cycle(&DevRequest {
+                game_dir: game_dir.clone(),
+                out: out.clone(),
+                metadata_out: metadata_out.clone(),
+                index_locator: index_locator.clone(),
+                dry_run_publish: *dry_run_publish,
+                replace_existing: *replace_existing,
+            })?;
+            cycles += 1;
+            let report = CreatorCommandReport::success_dev(cycle, true, cycles);
+            print_creator_report(&report);
+        }
+    }
+
     let report = execute_creator_command(command.clone())
         .unwrap_or_else(|err| CreatorCommandReport::failure(&command, err.to_string()));
 
+    print_creator_report(&report);
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
+fn print_creator_report(report: &CreatorCommandReport) {
     println!("command={}", report.command);
     println!("success={}", report.success);
     println!("message={}", report.message);
@@ -867,11 +1084,11 @@ fn run_creator_cli(command: CreatorCommand) -> Result<()> {
     if let Some(dry_run) = report.dry_run {
         println!("publish.dry_run={dry_run}");
     }
-
-    if report.success {
-        Ok(())
-    } else {
-        Err(anyhow!(report.message))
+    if let Some(watch_mode) = report.watch_mode {
+        println!("dev.watch={watch_mode}");
+    }
+    if let Some(cycles) = report.dev_cycles {
+        println!("dev.cycles={cycles}");
     }
 }
 
@@ -2794,6 +3011,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_dev_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--dev".to_string(),
+            "/tmp/game".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--out".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--metadata-out".to_string(),
+            "/tmp/out/sample-game-1.2.3.metadata.json".to_string(),
+        ])
+        .expect("dev mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Dev {
+                game_dir: PathBuf::from("/tmp/game"),
+                out: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz")),
+                metadata_out: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.metadata.json")),
+                index_locator: "file:///tmp/index.json".to_string(),
+                watch: false,
+                interval_ms: 1_000,
+                dry_run_publish: false,
+                replace_existing: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_dev_watch_launch_mode_with_flags() {
+        let mode = parse_launch_mode(vec![
+            "--dev".to_string(),
+            "/tmp/game".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--watch".to_string(),
+            "--interval-ms".to_string(),
+            "250".to_string(),
+            "--dry-run".to_string(),
+            "--replace".to_string(),
+        ])
+        .expect("dev watch mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Dev {
+                game_dir: PathBuf::from("/tmp/game"),
+                out: None,
+                metadata_out: None,
+                index_locator: "file:///tmp/index.json".to_string(),
+                watch: true,
+                interval_ms: 250,
+                dry_run_publish: true,
+                replace_existing: true,
+            })
+        );
+    }
+
+    #[test]
     fn pack_launch_mode_requires_game_dir() {
         let err = parse_launch_mode(vec!["--pack".to_string()]);
         assert!(err.is_err());
@@ -2845,6 +3121,43 @@ mod tests {
         let err = parse_launch_mode(vec![
             "--publish".to_string(),
             "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--nope".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn dev_launch_mode_requires_game_dir() {
+        let err = parse_launch_mode(vec!["--dev".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn dev_launch_mode_requires_index_locator() {
+        let err = parse_launch_mode(vec!["--dev".to_string(), "/tmp/game".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn dev_launch_mode_rejects_invalid_interval() {
+        let err = parse_launch_mode(vec![
+            "--dev".to_string(),
+            "/tmp/game".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--interval-ms".to_string(),
+            "not-a-number".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn dev_launch_mode_rejects_unknown_argument() {
+        let err = parse_launch_mode(vec![
+            "--dev".to_string(),
+            "/tmp/game".to_string(),
             "--index".to_string(),
             "file:///tmp/index.json".to_string(),
             "--nope".to_string(),
