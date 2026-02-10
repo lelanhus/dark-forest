@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use flate2::read::GzDecoder;
@@ -10,6 +11,55 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
+
+const HTTP_MAX_ATTEMPTS: usize = 3;
+const HTTP_RETRY_BACKOFF_BASE_MS: u64 = 40;
+const HTTP_CONNECT_TIMEOUT_MS: u64 = 800;
+const HTTP_READ_TIMEOUT_MS: u64 = 1_500;
+
+#[derive(Debug, Clone)]
+enum HttpAttemptError {
+    Status(u16),
+    Transport(String),
+    Read(String),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+enum MockHttpStep {
+    Bytes(Vec<u8>),
+    Status(u16),
+    Transport(String),
+}
+
+#[cfg(test)]
+static HTTP_MOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, Vec<MockHttpStep>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+fn register_http_mock(locator: &str, steps: Vec<MockHttpStep>) {
+    if let Ok(mut mocks) = HTTP_MOCKS.lock() {
+        mocks.insert(locator.to_string(), steps);
+    }
+}
+
+#[cfg(test)]
+fn pop_http_mock_step(locator: &str) -> Option<MockHttpStep> {
+    let Ok(mut mocks) = HTTP_MOCKS.lock() else {
+        return None;
+    };
+    let entry = mocks.get_mut(locator)?;
+    if entry.is_empty() {
+        mocks.remove(locator);
+        return None;
+    }
+    let step = entry.remove(0);
+    if entry.is_empty() {
+        mocks.remove(locator);
+    }
+    Some(step)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRef {
@@ -644,9 +694,9 @@ fn locator_to_path(locator: &str) -> PathBuf {
 
 fn fetch_text_from_locator(locator: &str) -> Result<String> {
     if locator.starts_with("http://") || locator.starts_with("https://") {
-        return Err(anyhow!(
-            "HTTP index locators are not supported in this environment: {locator}"
-        ));
+        let bytes = fetch_http_bytes_with_retry(locator)?;
+        return String::from_utf8(bytes)
+            .map_err(|err| anyhow!("HTTP response from {locator} was not valid UTF-8: {err}"));
     }
 
     let path = locator_to_path(locator);
@@ -655,13 +705,85 @@ fn fetch_text_from_locator(locator: &str) -> Result<String> {
 
 fn fetch_bytes_from_locator(locator: &str) -> Result<Vec<u8>> {
     if locator.starts_with("http://") || locator.starts_with("https://") {
-        return Err(anyhow!(
-            "HTTP artifact locators are not supported in this environment: {locator}"
-        ));
+        return fetch_http_bytes_with_retry(locator);
     }
 
     let path = locator_to_path(locator);
     fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn fetch_http_bytes_with_retry(locator: &str) -> Result<Vec<u8>> {
+    let mut last_retryable_error = None::<String>;
+    for attempt in 1..=HTTP_MAX_ATTEMPTS {
+        match fetch_http_bytes_once(locator) {
+            Ok(bytes) => return Ok(bytes),
+            Err(HttpAttemptError::Status(status)) => {
+                let retryable = is_retryable_http_status(status);
+                let message = format!("HTTP status {status} from {locator}");
+                if !retryable || attempt == HTTP_MAX_ATTEMPTS {
+                    return Err(anyhow!(message));
+                }
+                last_retryable_error = Some(message);
+            }
+            Err(HttpAttemptError::Transport(err)) => {
+                let message = format!("HTTP transport failure for {locator}: {err}");
+                if attempt == HTTP_MAX_ATTEMPTS {
+                    return Err(anyhow!(message));
+                }
+                last_retryable_error = Some(message);
+            }
+            Err(HttpAttemptError::Read(err)) => {
+                let message = format!("HTTP read failure for {locator}: {err}");
+                if attempt == HTTP_MAX_ATTEMPTS {
+                    return Err(anyhow!(message));
+                }
+                last_retryable_error = Some(message);
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(
+            HTTP_RETRY_BACKOFF_BASE_MS * u64::try_from(attempt).unwrap_or(1),
+        ));
+    }
+
+    Err(anyhow!(
+        "{}",
+        last_retryable_error.unwrap_or_else(|| format!("HTTP fetch failed for {locator}"))
+    ))
+}
+
+fn fetch_http_bytes_once(locator: &str) -> std::result::Result<Vec<u8>, HttpAttemptError> {
+    #[cfg(test)]
+    if let Some(step) = pop_http_mock_step(locator) {
+        return match step {
+            MockHttpStep::Bytes(bytes) => Ok(bytes),
+            MockHttpStep::Status(status) => Err(HttpAttemptError::Status(status)),
+            MockHttpStep::Transport(err) => Err(HttpAttemptError::Transport(err)),
+        };
+    }
+
+    let response = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_millis(HTTP_CONNECT_TIMEOUT_MS))
+        .timeout(Duration::from_millis(HTTP_READ_TIMEOUT_MS))
+        .build()
+        .map_err(|err| HttpAttemptError::Transport(err.to_string()))?
+        .get(locator)
+        .send()
+        .map_err(|err| HttpAttemptError::Transport(err.to_string()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(HttpAttemptError::Status(status.as_u16()));
+    }
+
+    let bytes = response
+        .bytes()
+        .map_err(|err| HttpAttemptError::Read(err.to_string()))?;
+    Ok(bytes.to_vec())
+}
+
+fn is_retryable_http_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -709,8 +831,8 @@ fn to_hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EntryType, IndexRegistryProvider, RegistryProvider, parse_manifest, to_hex_lower,
-        unpack_tarball_to_dir,
+        EntryType, IndexRegistryProvider, MockHttpStep, RegistryProvider, parse_manifest,
+        register_http_mock, to_hex_lower, unpack_tarball_to_dir,
     };
     use anyhow::Result;
     use proptest::prelude::*;
@@ -824,6 +946,88 @@ mod tests {
         fs::remove_file(&index_path)?;
         let second = provider.list()?;
         assert_eq!(second.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn index_http_retry_then_success_and_caches() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let artifact = root.join("snake-0.2.0.tar.gz");
+        create_tarball(&artifact, "snake-plus", "0.2.0")?;
+        let index_body = sample_index_json(&artifact, "0.2.0")?;
+
+        let locator = "http://mock.local/index.json".to_string();
+        register_http_mock(
+            &locator,
+            vec![
+                MockHttpStep::Status(503_u16),
+                MockHttpStep::Bytes(index_body.into_bytes()),
+            ],
+        );
+
+        let provider = IndexRegistryProvider::new(locator.clone(), root.join("cache"));
+        let listings = provider.list()?;
+        assert_eq!(listings.len(), 1);
+
+        let cache_path = index_cache_path(root.join("cache").as_path(), &locator);
+        assert!(cache_path.exists(), "expected catalog cache to be written");
+        Ok(())
+    }
+
+    #[test]
+    fn index_http_falls_back_to_cache_on_hard_failure() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let artifact = root.join("snake-0.2.0.tar.gz");
+        create_tarball(&artifact, "snake-plus", "0.2.0")?;
+        let index_body = sample_index_json(&artifact, "0.2.0")?;
+
+        let locator = "http://mock.local/fallback-index.json".to_string();
+        register_http_mock(&locator, vec![MockHttpStep::Bytes(index_body.into_bytes())]);
+
+        let provider = IndexRegistryProvider::new(locator.clone(), root.join("cache"));
+        let first = provider.list()?;
+        assert_eq!(first.len(), 1);
+
+        register_http_mock(
+            &locator,
+            vec![MockHttpStep::Transport("offline".to_string())],
+        );
+
+        let second = provider.list()?;
+        assert_eq!(second.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_cached_http_index_returns_deterministic_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let artifact = root.join("snake-0.2.0.tar.gz");
+        create_tarball(&artifact, "snake-plus", "0.2.0")?;
+        let index_body = sample_index_json(&artifact, "0.2.0")?;
+
+        let locator = "http://mock.local/corrupt-index.json".to_string();
+        register_http_mock(&locator, vec![MockHttpStep::Bytes(index_body.into_bytes())]);
+
+        let provider = IndexRegistryProvider::new(locator.clone(), root.join("cache"));
+        let first = provider.list()?;
+        assert_eq!(first.len(), 1);
+
+        let cache_path = index_cache_path(root.join("cache").as_path(), &locator);
+        fs::write(&cache_path, "{not-json")?;
+
+        register_http_mock(
+            &locator,
+            vec![MockHttpStep::Transport("offline".to_string())],
+        );
+
+        let err = provider
+            .list()
+            .expect_err("expected corrupt cache to produce deterministic error");
+        let message = err.to_string();
+        assert!(message.contains("no valid cache available"));
         Ok(())
     }
 
@@ -945,6 +1149,12 @@ mod tests {
         let bytes = encoder.finish()?;
         fs::write(path, bytes)?;
         Ok(())
+    }
+
+    fn index_cache_path(cache_root: &Path, locator: &str) -> std::path::PathBuf {
+        let digest = Sha256::digest(locator.as_bytes());
+        let key = to_hex_lower(&digest);
+        cache_root.join("index").join(format!("{key}.json"))
     }
 
     proptest! {
