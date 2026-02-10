@@ -199,6 +199,13 @@ pub struct VerifyOutcome {
     pub actual_sha256: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoveOutcome {
+    pub game_id: String,
+    pub removed_version: String,
+    pub had_versions_remaining: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum ContentTransactionError {
     #[error("invalid artifact directory: {0}")]
@@ -218,6 +225,8 @@ pub enum ContentTransactionError {
     NoRollbackTarget(String),
     #[error("installed version directory is missing for {game_id}@{version}")]
     MissingInstalledVersion { game_id: String, version: String },
+    #[error("cannot remove protected source for {game_id}: {source_ref}")]
+    ProtectedSource { game_id: String, source_ref: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -450,6 +459,64 @@ impl JsonContentStore {
             verified,
             expected_sha256,
             actual_sha256,
+        })
+    }
+
+    pub fn remove_game(
+        &self,
+        game_id: &str,
+    ) -> std::result::Result<RemoveOutcome, ContentTransactionError> {
+        self.ensure_layout()
+            .map_err(ContentTransactionError::Other)?;
+
+        let installed = self
+            .load_installed()
+            .map_err(ContentTransactionError::Other)?;
+        let index = installed
+            .installed
+            .iter()
+            .position(|entry| entry.id == game_id)
+            .ok_or_else(|| ContentTransactionError::GameNotInstalled(game_id.to_string()))?;
+        let record = installed.installed[index].clone();
+
+        if record.source.starts_with("builtin://") {
+            return Err(ContentTransactionError::ProtectedSource {
+                game_id: game_id.to_string(),
+                source_ref: record.source,
+            });
+        }
+
+        let mut next_installed = installed.clone();
+        let removed = next_installed.installed.remove(index);
+
+        let permissions = self
+            .load_permissions()
+            .map_err(ContentTransactionError::Other)?;
+        let mut next_permissions = permissions.clone();
+        next_permissions.grants.remove(game_id);
+
+        self.save_installed(&next_installed)
+            .map_err(ContentTransactionError::Other)?;
+
+        if let Err(err) = self.save_permissions(&next_permissions) {
+            let _ = self.save_installed(&installed);
+            return Err(ContentTransactionError::Other(err));
+        }
+
+        let game_dir = self.game_dir(game_id);
+        if game_dir.exists() {
+            fs::remove_dir_all(&game_dir).map_err(|err| {
+                ContentTransactionError::Other(anyhow!(
+                    "failed to remove game directory {}: {err}",
+                    game_dir.display()
+                ))
+            })?;
+        }
+
+        Ok(RemoveOutcome {
+            game_id: game_id.to_string(),
+            removed_version: removed.current_version,
+            had_versions_remaining: removed.installed_versions.len() > 1,
         })
     }
 
@@ -1083,6 +1150,82 @@ mod tests {
             .verify_game("snake-plus")
             .map_err(|err| anyhow!(err.to_string()))?;
         assert!(!outcome.verified);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_uninstalls_game_and_cleans_permissions() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+
+        let artifact = create_artifact_dir(root.as_path(), "snake-plus", "0.1.0")?;
+        store
+            .install_from_directory(&InstallRequest {
+                game_id: "snake-plus".to_string(),
+                version: "0.1.0".to_string(),
+                source: "local://fixtures".to_string(),
+                artifact_dir: artifact,
+                expected_sha256: None,
+            })
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        let mut permissions = store.load_permissions()?;
+        permissions.grants.insert(
+            "snake-plus".to_string(),
+            vec![PermissionGrant {
+                capability: Capability::TerminalRawInput,
+                scope: Scope::None,
+                decision: Decision::Allow,
+                remembered: true,
+                granted_at: chrono::Utc::now(),
+            }],
+        );
+        store.save_permissions(&permissions)?;
+
+        let outcome = store
+            .remove_game("snake-plus")
+            .map_err(|err| anyhow!(err.to_string()))?;
+
+        assert_eq!(outcome.game_id, "snake-plus");
+        assert_eq!(outcome.removed_version, "0.1.0");
+        assert!(!outcome.had_versions_remaining);
+        assert_eq!(store.read_current_pointer("snake-plus"), None);
+        assert!(!root.join("games/snake-plus").exists());
+
+        let installed = store.load_installed()?;
+        assert!(
+            !installed
+                .installed
+                .iter()
+                .any(|item| item.id == "snake-plus")
+        );
+
+        let permissions = store.load_permissions()?;
+        assert!(!permissions.grants.contains_key("snake-plus"));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_rejects_builtin_game_records() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(PathBuf::from(temp.path()));
+
+        let mut installed = store.load_installed()?;
+        installed.installed.push(super::InstalledRecord {
+            id: "snake-plus".to_string(),
+            source: "builtin://dark-forest".to_string(),
+            current_version: "0.1.0".to_string(),
+            installed_versions: vec!["0.1.0".to_string()],
+            version_checksums: BTreeMap::new(),
+        });
+        store.save_installed(&installed)?;
+
+        let result = store.remove_game("snake-plus");
+        assert!(matches!(
+            result,
+            Err(super::ContentTransactionError::ProtectedSource { .. })
+        ));
         Ok(())
     }
 

@@ -17,7 +17,7 @@ Source of product scope: `SPEC.md`.
 - M1 Shell Skeleton: Complete
 - M2 Runtime v0: Complete
 - M3 Built-in Native Games (`v0.1.0`): Complete
-- M4 Local Installs + Hot-load (`v0.2`): In Progress
+- M4 Local Installs + Hot-load (`v0.2`): Complete
 - M5 First Remote Provider (`v0.3`): In Progress
 - M6+ : Pending
 
@@ -64,21 +64,21 @@ Exit criteria met:
 - Local high scores and play stats implemented.
 - Cross-platform release artifact workflow defined for first release matrix.
 
-## M4 - Local Installs and Hot-load (v0.2, In Progress)
+## M4 - Local Installs and Hot-load (v0.2, Complete)
 
 Objective: content management for local artifacts.
 
-Planned exit criteria:
+Exit criteria met:
 
 - Local provider supports install/update/remove.
 - Atomic `current` pointer flips verified.
 - Hot-load watcher updates Library and Installed views.
 - Rollback is immediate and reliable.
 
-Current implementation slice:
+Delivered:
 
 - Local install transaction path with atomic `current` pointer file updates.
-- Rollback and verify operations in content layer plus shell action triggers.
+- Remove/rollback/verify operations in content layer plus shell action triggers.
 - Polling-based hot-load refresh for `installed.json` and `games/**/game.json`.
 
 Dependencies:

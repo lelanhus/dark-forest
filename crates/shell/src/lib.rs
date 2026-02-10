@@ -82,6 +82,7 @@ pub enum ShellCommand {
     UpdateInstalled(String),
     RollbackInstalled(String),
     VerifyInstalled(String),
+    RemoveInstalled(String),
     SetOverlay(Option<Overlay>),
     CyclePerformance,
     None,
@@ -569,6 +570,11 @@ impl ShellState {
                     .map(|id| vec![ShellCommand::VerifyInstalled(id)])
                     .unwrap_or_else(|| vec![ShellCommand::None])
             }
+            KeyCode::Char('x') | KeyCode::Char('X') if matches!(route, Route::Installed) => {
+                selected_id
+                    .map(|id| vec![ShellCommand::RemoveInstalled(id)])
+                    .unwrap_or_else(|| vec![ShellCommand::None])
+            }
             _ => vec![ShellCommand::None],
         }
     }
@@ -589,6 +595,14 @@ impl ShellState {
         match key.code {
             KeyCode::Esc => vec![ShellCommand::OpenRoute(Route::Library)],
             KeyCode::Enter => vec![ShellCommand::StartGame(id)],
+            KeyCode::Char('x') | KeyCode::Char('X')
+                if self
+                    .installed_game_ids
+                    .iter()
+                    .any(|installed| installed == &id) =>
+            {
+                vec![ShellCommand::RemoveInstalled(id)]
+            }
             _ => vec![ShellCommand::None],
         }
     }
@@ -932,7 +946,7 @@ fn render_installed(
         |game| {
             let installed = context.installed.get(&game.id).cloned().unwrap_or_default();
             format!(
-                "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- [V] Verify\n- [B] Rollback\n- [U] Update\n\nPress Enter for game detail.",
+                "{}\n\n{}\n\nVersion: {}\nSource: {}\n\nActions:\n- [V] Verify\n- [B] Rollback\n- [U] Update\n- [X] Remove\n\nPress Enter for game detail.",
                 game.name,
                 game.description,
                 if installed.current_version.is_empty() {
@@ -1000,6 +1014,7 @@ fn render_detail(
         .map_or_else(|| "n/a".to_string(), |value| value.to_string());
     let last_played = stats.last_played_at.unwrap_or_else(|| "never".to_string());
     let installed = context.installed.get(id).cloned().unwrap_or_default();
+    let is_installed = context.installed.contains_key(id);
     let version = if installed.current_version.is_empty() {
         "unknown".to_string()
     } else {
@@ -1010,13 +1025,18 @@ fn render_detail(
         || format!("Unknown game: {id}"),
         |game| {
             format!(
-                "{}\n\n{}\n\nVersion: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nPress Enter to start. Esc to go back.",
+                "{}\n\n{}\n\nVersion: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nActions:\n- Enter: start game{}\n- Esc: back",
                 game.name,
                 game.description,
                 version,
                 stats.play_count,
                 best_score,
-                last_played
+                last_played,
+                if is_installed {
+                    "\n- X: remove installed copy"
+                } else {
+                    ""
+                }
             )
         },
     );
@@ -1569,6 +1589,7 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         assert_buffer_contains(&buffer, "Version:");
         assert_buffer_contains(&buffer, "[V] Verify");
+        assert_buffer_contains(&buffer, "[X] Remove");
         assert_buffer_not_contains(&buffer, "(planned)");
         Ok(())
     }
@@ -1607,6 +1628,36 @@ mod tests {
         assert_eq!(
             verify,
             vec![ShellCommand::VerifyInstalled("snake-plus".to_string())]
+        );
+
+        let remove = state.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            remove,
+            vec![ShellCommand::RemoveInstalled("snake-plus".to_string())]
+        );
+    }
+
+    #[test]
+    fn detail_remove_key_emits_operation_command_for_installed_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "snake-plus".to_string(),
+        };
+        state.set_installed_game_ids(vec!["snake-plus".to_string()]);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            commands,
+            vec![ShellCommand::RemoveInstalled("snake-plus".to_string())]
         );
     }
 

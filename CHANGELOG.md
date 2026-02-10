@@ -13,8 +13,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Permission grant persistence APIs (`load_permissions`/`save_permissions`) with typed capability grants.
 - `index://` registry provider with cached index fallback and artifact download support.
 - Tarball artifact unpack helper used by index installs.
-- CLI operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`.
-- Shell Installed route action keybindings (`U` update, `B` rollback, `V` verify).
+- CLI operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`, `--remove`.
+- Shell Installed route action keybindings (`U` update, `B` rollback, `V` verify, `X` remove).
 - Polling hot-load detection for `installed.json` and `games/**/game.json`.
 - New ADR for content transactions and index provider architecture.
 
@@ -23,6 +23,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Manifest parsing now normalizes mixed legacy/typed permission declarations into typed grants.
 - Installed detail panel actions are now active commands rather than planned placeholders.
 - App runtime now executes content operations through a serialized background worker queue.
+- Remove operation revokes persisted permissions for the uninstalled game id.
 
 ### Fixed
 

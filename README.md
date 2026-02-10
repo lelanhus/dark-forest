@@ -21,10 +21,10 @@ Implemented in `v0.1.0`:
 Implemented post-`v0.1.0` (current workspace):
 
 - Content transaction pipeline for local installs (`tmp -> verify -> atomic move -> current pointer -> metadata commit`).
-- Rollback and verify operations over installed versions.
+- Remove, rollback, and verify operations over installed versions.
 - `index://` remote registry provider with local cache fallback.
 - Remote artifact download, checksum validation, and tarball unpack support.
-- Background operation queue from the shell for Installed actions (`U` update, `B` rollback, `V` verify).
+- Background operation queue from the shell for Installed actions (`U` update, `B` rollback, `V` verify, `X` remove).
 - Polling-based hot-load refresh over `installed.json` and `games/**/game.json`.
 - Manifest permission normalization from legacy strings to typed capability grants.
 
@@ -50,6 +50,7 @@ cargo run -p dark-forest -- --install-index file:///path/to/index.json snake-plu
 cargo run -p dark-forest -- --update snake-plus
 cargo run -p dark-forest -- --rollback snake-plus
 cargo run -p dark-forest -- --verify snake-plus
+cargo run -p dark-forest -- --remove snake-plus
 ```
 
 ## Release Artifacts (v0.1.0)
