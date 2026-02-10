@@ -842,7 +842,7 @@ fn home_detail_lines(state: &ShellState, context: &RenderContext) -> Vec<Line<'s
             Line::from(""),
             Line::from("All installed content is up to date."),
             Line::from(Span::styled(
-                "Marketplace providers arrive in a later milestone.",
+                "Marketplace registries are configurable in Settings.",
                 muted_style(),
             )),
             Line::from(""),
@@ -1632,6 +1632,27 @@ mod tests {
         assert_buffer_contains(&buffer, "[V] Verify");
         assert_buffer_contains(&buffer, "[X] Remove");
         assert_buffer_not_contains(&buffer, "(planned)");
+        Ok(())
+    }
+
+    #[test]
+    fn home_updates_panel_no_longer_mentions_later_milestone() -> std::io::Result<()> {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Home;
+        state.home_index = 3;
+
+        let context = RenderContext::default();
+        terminal.draw(|frame| {
+            render(frame, &state, &context);
+        })?;
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_buffer_not_contains(
+            &buffer,
+            "Marketplace providers arrive in a later milestone.",
+        );
         Ok(())
     }
 
