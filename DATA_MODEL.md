@@ -200,6 +200,37 @@ Validation rules:
 - Third-party native entry declarations must be rejected by policy unless explicitly trusted source rules allow them.
 - `permissions` accepts legacy string labels and typed capability objects; host normalizes into typed grants.
 
+## Registry Index Catalog (`index.json`)
+
+Purpose: provider catalog contract consumed by `index://` and now authored by creator `publish`.
+
+Top-level fields:
+
+- `schema_version: u32` (current creator-emitted value: `1`)
+- `games: Vec<IndexGame>`
+
+`IndexGame` fields:
+
+- `id: String`
+- `name: String`
+- `description: String` (optional, default empty)
+- `tags: Vec<String>` (optional)
+- `author: String`
+- `permissions_summary: Vec<String>`
+- `host_api_range: SemVerRange`
+- `entry_type: EntryType` (optional override)
+- `versions: Vec<IndexVersion>`
+
+`IndexVersion` fields:
+
+- `version: SemVer`
+- `artifact: String` (artifact locator relative to index location or absolute locator)
+- `checksum_sha256: Sha256Hex` (optional)
+- `size_bytes: u64` (optional)
+- `entry_type: EntryType` (optional override)
+- `host_api: SemVerRange` (optional override)
+- `permissions: Vec<PermissionDecl>` (legacy string or typed object)
+
 ## Creator Artifact Metadata (`*.metadata.json`)
 
 Purpose: sidecar contract emitted by creator tooling for packaged artifacts.

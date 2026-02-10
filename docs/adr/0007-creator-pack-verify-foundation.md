@@ -25,6 +25,7 @@ registry/runtime code paths that solve different problems.
 2. Add CLI entrypoints in `crates/app`:
    - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
    - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
+   - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]` (local index only)
 3. `pack` produces:
    - deterministic `.tar.gz` artifact with stable lexical file ordering
    - normalized archive header fields for byte-repeatability
@@ -33,7 +34,9 @@ registry/runtime code paths that solve different problems.
    - checksum and byte-size match against metadata
    - artifact filename match against metadata
    - unpacked `game.json` identity/compat fields match metadata (`id`, `version`, `entry_type`, `host_api`)
-5. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
+5. `publish` consumes verified artifacts + metadata, stages artifacts into the target local index
+   directory, and upserts index catalog entries for game/version.
+6. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
 
 ## Alternatives Considered
 
@@ -63,16 +66,16 @@ Negative:
 Operational impact:
 
 - `README.md`, `ROADMAP.md`, and `DATA_MODEL.md` must track creator metadata + CLI behavior.
-- Future `publish` work can consume creator metadata instead of recomputing package facts.
+- Local publish flow reuses creator metadata instead of recomputing package facts.
 
 ## Validation
 
-- Unit tests in `crates/creator` cover pack output, determinism, verify success, and verify failure modes.
-- App CLI parsing tests cover `--pack` and `--verify-artifact` command surfaces.
+- Unit tests in `crates/creator` cover pack output, determinism, verify success/failure, and local
+  index publish behavior.
+- App CLI parsing tests cover `--pack`, `--verify-artifact`, and `--publish` command surfaces.
 - Full local quality gates remain required (`make ci`).
 
 ## Follow-up
 
-- Add creator `publish` workflow using this metadata contract.
 - Define signing model and verification extensions for marketplace trust requirements.
 - Add `dev` hot-reload flow and templates to complete remaining `M7` exit criteria.

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use flate2::{Compression, GzBuilder};
+use plugin_host::{Capability, Decision, EntryType, Scope};
 use registry::{parse_manifest, unpack_tarball_to_dir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,6 +41,23 @@ pub struct VerifyOutcome {
     pub version: String,
     pub artifact_sha256: String,
     pub artifact_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishRequest {
+    pub artifact_path: PathBuf,
+    pub metadata_path: Option<PathBuf>,
+    pub index_locator: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishOutcome {
+    pub index_path: PathBuf,
+    pub game_id: String,
+    pub version: String,
+    pub artifact_path: PathBuf,
+    pub created_game: bool,
+    pub created_version: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +236,126 @@ pub fn verify_artifact(request: &VerifyRequest) -> Result<VerifyOutcome> {
     })
 }
 
+pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
+    if request.index_locator.starts_with("http://") || request.index_locator.starts_with("https://")
+    {
+        return Err(anyhow!(
+            "publish currently supports only local index locators (file:// or path)"
+        ));
+    }
+
+    let verify_outcome = verify_artifact(&VerifyRequest {
+        artifact_path: request.artifact_path.clone(),
+        metadata_path: request.metadata_path.clone(),
+    })?;
+
+    let index_path = locator_to_path(&request.index_locator);
+    let index_dir = index_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    fs::create_dir_all(&index_dir).with_context(|| {
+        format!(
+            "failed to ensure index directory exists {}",
+            index_dir.display()
+        )
+    })?;
+
+    let artifact_file_name = request
+        .artifact_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "artifact path has no file name: {}",
+                request.artifact_path.display()
+            )
+        })?;
+    let published_artifact_path = index_dir.join(&artifact_file_name);
+    stage_published_artifact(
+        &request.artifact_path,
+        &published_artifact_path,
+        &verify_outcome.artifact_sha256,
+    )?;
+
+    let mut catalog = load_index_catalog(&index_path)?;
+    let temp = tempfile::tempdir().context("failed to create temporary publish directory")?;
+    unpack_tarball_to_dir(&published_artifact_path, temp.path())
+        .with_context(|| format!("failed to unpack {}", published_artifact_path.display()))?;
+    let manifest = load_manifest(temp.path())?;
+
+    let summary = summarize_permissions(&manifest.permissions);
+    let version_entry = IndexVersion {
+        version: manifest.version.clone(),
+        artifact: artifact_file_name,
+        checksum_sha256: Some(verify_outcome.artifact_sha256.clone()),
+        size_bytes: Some(verify_outcome.artifact_size_bytes),
+        entry_type: Some(manifest.entry_type),
+        host_api: Some(manifest.host_api.clone()),
+        permissions: manifest
+            .permissions
+            .iter()
+            .map(permission_to_json)
+            .collect::<Vec<_>>(),
+    };
+
+    let mut created_game = false;
+    let mut created_version = false;
+
+    if let Some(existing) = catalog.games.iter_mut().find(|item| item.id == manifest.id) {
+        if let Some(existing_version) = existing
+            .versions
+            .iter_mut()
+            .find(|item| item.version == manifest.version)
+        {
+            if existing_version.checksum_sha256.as_deref() == Some(&verify_outcome.artifact_sha256)
+            {
+                // idempotent publish for identical artifact/version
+            } else {
+                return Err(anyhow!(
+                    "version already exists with different checksum: {}@{}",
+                    manifest.id,
+                    manifest.version
+                ));
+            }
+        } else {
+            existing.versions.push(version_entry);
+            created_version = true;
+        }
+        existing.name = manifest.name.clone();
+        existing.author = manifest.author.clone();
+        existing.permissions_summary = summary;
+        existing.host_api_range = manifest.host_api.clone();
+        existing.entry_type = Some(manifest.entry_type);
+    } else {
+        catalog.games.push(IndexGame {
+            id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            description: String::new(),
+            tags: Vec::new(),
+            author: manifest.author.clone(),
+            permissions_summary: summary,
+            host_api_range: manifest.host_api.clone(),
+            entry_type: Some(manifest.entry_type),
+            versions: vec![version_entry],
+        });
+        created_game = true;
+        created_version = true;
+    }
+
+    sort_catalog(&mut catalog);
+    atomic_write_json(&index_path, &catalog)?;
+
+    Ok(PublishOutcome {
+        index_path,
+        game_id: verify_outcome.game_id,
+        version: verify_outcome.version,
+        artifact_path: published_artifact_path,
+        created_game,
+        created_version,
+    })
+}
+
 pub fn default_artifact_path(game_id: &str, version: &str) -> PathBuf {
     PathBuf::from("dist").join(format!("{game_id}-{version}.tar.gz"))
 }
@@ -330,6 +468,164 @@ fn entry_type_label(value: impl Serialize) -> Result<String> {
         .ok_or_else(|| anyhow!("entry_type did not serialize as string"))
 }
 
+fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::FsRead => "fs.read",
+        Capability::FsWrite => "fs.write",
+        Capability::Net => "net",
+        Capability::OpenUrl => "open_url",
+        Capability::Clipboard => "clipboard",
+        Capability::Clock => "clock",
+        Capability::Random => "random",
+        Capability::TerminalRawInput => "terminal.raw_input",
+    }
+}
+
+fn scope_to_json(scope: &Scope) -> serde_json::Value {
+    match scope {
+        Scope::None => serde_json::Value::Null,
+        Scope::Prompt => serde_json::json!({"prompt": true}),
+        Scope::Path(path) => serde_json::json!({"path": path}),
+        Scope::Paths(paths) => serde_json::json!({"paths": paths}),
+        Scope::Allowlist(values) => serde_json::json!({"allowlist": values}),
+    }
+}
+
+fn permission_to_json(grant: &plugin_host::CapabilityGrant) -> serde_json::Value {
+    serde_json::json!({
+        "capability": capability_label(grant.capability),
+        "scope": scope_to_json(&grant.scope),
+        "decision": match grant.decision {
+            Decision::Allow => "allow",
+            Decision::Deny => "deny",
+        }
+    })
+}
+
+fn summarize_permissions(permissions: &[plugin_host::CapabilityGrant]) -> Vec<String> {
+    let mut summary = Vec::new();
+    for grant in permissions {
+        let label = capability_label(grant.capability).to_string();
+        if !summary.iter().any(|item| item == &label) {
+            summary.push(label);
+        }
+    }
+    summary
+}
+
+fn locator_to_path(locator: &str) -> PathBuf {
+    if let Some(rest) = locator.strip_prefix("file://") {
+        return PathBuf::from(rest);
+    }
+    PathBuf::from(locator)
+}
+
+fn stage_published_artifact(
+    source: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    if source == destination {
+        return Ok(());
+    }
+
+    if destination.exists() {
+        let existing = fs::read(destination).with_context(|| {
+            format!(
+                "failed to read existing published artifact {}",
+                destination.display()
+            )
+        })?;
+        let existing_sha = to_hex_lower(&Sha256::digest(&existing));
+        if existing_sha.eq_ignore_ascii_case(expected_sha256) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "published artifact conflict at {}",
+            destination.display()
+        ));
+    }
+
+    let bytes = fs::read(source)
+        .with_context(|| format!("failed to read source artifact {}", source.display()))?;
+    let actual_sha = to_hex_lower(&Sha256::digest(&bytes));
+    if !actual_sha.eq_ignore_ascii_case(expected_sha256) {
+        return Err(anyhow!(
+            "source artifact checksum mismatch while publishing (expected {expected_sha256}, actual {actual_sha})"
+        ));
+    }
+    atomic_write_bytes(destination, &bytes)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct IndexCatalog {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    games: Vec<IndexGame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexGame {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    permissions_summary: Vec<String>,
+    #[serde(default)]
+    host_api_range: String,
+    #[serde(default)]
+    entry_type: Option<EntryType>,
+    #[serde(default)]
+    versions: Vec<IndexVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexVersion {
+    version: String,
+    artifact: String,
+    #[serde(default)]
+    checksum_sha256: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    entry_type: Option<EntryType>,
+    #[serde(default)]
+    host_api: Option<String>,
+    #[serde(default)]
+    permissions: Vec<serde_json::Value>,
+}
+
+fn load_index_catalog(index_path: &Path) -> Result<IndexCatalog> {
+    if !index_path.exists() {
+        return Ok(IndexCatalog {
+            schema_version: 1,
+            games: Vec::new(),
+        });
+    }
+
+    let raw = fs::read_to_string(index_path)
+        .with_context(|| format!("failed to read index {}", index_path.display()))?;
+    let mut parsed: IndexCatalog = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse index {}", index_path.display()))?;
+    if parsed.schema_version == 0 {
+        parsed.schema_version = 1;
+    }
+    Ok(parsed)
+}
+
+fn sort_catalog(catalog: &mut IndexCatalog) {
+    catalog.games.sort_by(|a, b| a.id.cmp(&b.id));
+    for game in &mut catalog.games {
+        game.versions.sort_by(|a, b| b.version.cmp(&a.version));
+    }
+}
+
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -387,8 +683,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        PackRequest, VerifyRequest, default_artifact_path, default_metadata_path, pack_game,
-        verify_artifact,
+        PackRequest, PublishRequest, VerifyRequest, default_artifact_path, default_metadata_path,
+        pack_game, publish_to_index, verify_artifact,
     };
 
     static TEST_CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -433,6 +729,24 @@ mod tests {
         fs::write(game_dir.join("main.wasm"), b"wasm bytes")?;
         fs::write(game_dir.join("assets.txt"), b"asset payload")?;
         Ok(game_dir)
+    }
+
+    fn write_manifest_version(game_dir: &Path, game_id: &str, version: &str) -> Result<()> {
+        let manifest = serde_json::json!({
+            "id": game_id,
+            "name": "Sample Game",
+            "version": version,
+            "author": "Dark Forest",
+            "entry_type": "wasm",
+            "entry": "main.wasm",
+            "host_api": "^0.1",
+            "permissions": ["terminal.raw_input"]
+        });
+        fs::write(
+            game_dir.join("game.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -600,6 +914,131 @@ mod tests {
         assert_eq!(outcome.metadata_path, expected_metadata);
         assert!(outcome.artifact_path.exists());
         assert!(outcome.metadata_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn publish_to_new_index_creates_catalog_entry() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let index_path = temp.path().join("registry").join("index.json");
+        let outcome = publish_to_index(&PublishRequest {
+            artifact_path: artifact_path.clone(),
+            metadata_path: Some(metadata_path),
+            index_locator: index_path.to_string_lossy().to_string(),
+        })?;
+
+        assert_eq!(outcome.game_id, "sample-game");
+        assert_eq!(outcome.version, "1.2.3");
+        assert!(outcome.created_game);
+        assert!(outcome.created_version);
+        assert!(index_path.exists());
+        assert!(outcome.artifact_path.exists());
+
+        let index_raw = fs::read_to_string(&index_path)?;
+        let index_json: Value = serde_json::from_str(&index_raw)?;
+        assert_eq!(index_json["schema_version"], 1);
+        assert_eq!(index_json["games"][0]["id"], "sample-game");
+        assert_eq!(index_json["games"][0]["versions"][0]["version"], "1.2.3");
+        Ok(())
+    }
+
+    #[test]
+    fn publish_to_existing_index_appends_new_version() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let index_path = temp.path().join("registry").join("index.json");
+
+        let artifact_v1 = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_v1 = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        pack_game(&PackRequest {
+            game_dir: game_dir.clone(),
+            out: Some(artifact_v1.clone()),
+            metadata_out: Some(metadata_v1.clone()),
+        })?;
+        publish_to_index(&PublishRequest {
+            artifact_path: artifact_v1,
+            metadata_path: Some(metadata_v1),
+            index_locator: index_path.to_string_lossy().to_string(),
+        })?;
+
+        write_manifest_version(&game_dir, "sample-game", "1.2.4")?;
+        let artifact_v2 = temp.path().join("dist").join("sample-game-1.2.4.tar.gz");
+        let metadata_v2 = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.4.metadata.json");
+        let pack_v2 = pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_v2.clone()),
+            metadata_out: Some(metadata_v2.clone()),
+        })?;
+        let publish_v2 = publish_to_index(&PublishRequest {
+            artifact_path: artifact_v2,
+            metadata_path: Some(metadata_v2),
+            index_locator: index_path.to_string_lossy().to_string(),
+        })?;
+
+        assert!(!publish_v2.created_game);
+        assert!(publish_v2.created_version);
+        assert_eq!(publish_v2.version, "1.2.4");
+        assert_eq!(pack_v2.metadata.version, "1.2.4");
+
+        let index_raw = fs::read_to_string(&index_path)?;
+        let index_json: Value = serde_json::from_str(&index_raw)?;
+        let versions = index_json["games"][0]["versions"]
+            .as_array()
+            .expect("versions must be array");
+        assert_eq!(versions.len(), 2);
+        assert!(
+            versions
+                .iter()
+                .any(|item| item["version"] == Value::String("1.2.3".to_string()))
+        );
+        assert!(
+            versions
+                .iter()
+                .any(|item| item["version"] == Value::String("1.2.4".to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn publish_rejects_remote_index_locator() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let result = publish_to_index(&PublishRequest {
+            artifact_path,
+            metadata_path: Some(metadata_path),
+            index_locator: "https://example.com/index.json".to_string(),
+        });
+        assert!(result.is_err());
         Ok(())
     }
 }

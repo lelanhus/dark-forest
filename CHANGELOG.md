@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - New creator CLI modes:
   - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
   - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
+  - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]`
 - Deterministic `.tar.gz` packaging flow with normalized archive headers and stable file ordering.
 - Creator metadata sidecar JSON for packaged artifacts:
   - `schema_version`
@@ -23,10 +24,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - `artifact_sha256`
   - `artifact_size_bytes`
   - `generated_at`
+- Local index publish flow that stages artifact files near the target index and upserts catalog
+  game/version entries.
 
 ### Changed
 
-- Roadmap milestone `M7` status moved from pending to in-progress with `pack/verify` foundation delivered.
+- Roadmap milestone `M7` status moved from pending to in-progress with creator pack/verify/publish foundation delivered.
 
 ## [1.0.0] - 2026-02-10
 
