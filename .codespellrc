@@ -1,6 +1,6 @@
 [codespell]
 check-filenames =
 check-hidden =
-skip = ./.git,./target,./LICENSE-APACHE
+skip = ./.git,./target,./LICENSE-APACHE,./scripts/spellcheck_fallback.py,./Cargo.lock
 ignore-words-list = ratatui,Ratatui
 quiet-level = 2

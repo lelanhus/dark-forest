@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Dark Forest is a terminal-native arcade console written in Rust (edition 2024, MSRV 1.93). It renders a GUI-like experience in the terminal using ratatui/crossterm, with a WASM sandbox for third-party games and a capability-based permission model.
+Dark Forest is a terminal-native arcade console written in Rust
+(edition 2024, MSRV 1.93). It renders a GUI-like experience in the
+terminal using ratatui/crossterm, with a WASM sandbox for third-party
+games and a capability-based permission model.
 
 ## Build & Quality Commands
 
@@ -34,7 +37,7 @@ cargo llvm-cov --workspace --all-features --all-targets --summary-only
 
 9-crate workspace with explicit trust boundaries:
 
-```
+```text
 crates/app/          Binary: main entry point, CLI args, event loop, operation dispatch
 crates/shell/        UI routes (Home, Library, Settings, GameDetail, Runner),
                      overlays (CommandPalette, Search, Help, PermissionPrompt), keymaps
@@ -50,7 +53,9 @@ crates/theme/        Theme tokens and style helpers
 crates/diagnostics/  Terminal capability detection
 ```
 
-**Key dependency flow**: app → shell, runtime, content, registry, plugin-host, games. Cross-crate calls go through explicit interfaces; don't leak internals across boundaries.
+**Key dependency flow**: app → shell, runtime, content, registry,
+plugin-host, games. Cross-crate calls go through explicit interfaces;
+don't leak internals across boundaries.
 
 ## Trust Model
 
@@ -102,7 +107,7 @@ git push origin main
 ## Key Dependencies
 
 | Dependency | Purpose |
-|-----------|---------|
+| ---------- | ------- |
 | ratatui 0.29 | TUI rendering (all-widgets) |
 | crossterm 0.28 | Terminal I/O and events |
 | tokio 1.44 | Async runtime (multi-thread) |
@@ -115,6 +120,7 @@ git push origin main
 ## Documentation Update Requirements
 
 When changing behavior or policy, update the relevant docs:
+
 - `SPEC.md` — product requirements
 - `ARCHITECTURE.md` — structural design
 - `DATA_MODEL.md` — persisted entity contracts
