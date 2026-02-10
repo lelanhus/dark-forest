@@ -37,6 +37,7 @@ Implemented post-`v0.1.0` (current workspace):
 - Permission prompt flow (`Allow Once`, `Allow Always`, `Deny Once`, `Deny Always`) with remembered decisions.
 - Permission audit/revoke in Settings and CLI parity (`--permissions-list`, `--permissions-revoke`).
 - Install/update permission reconciliation that drops grants no longer declared by manifest.
+- Creator tooling foundation: deterministic packaging and artifact verification (`--pack`, `--verify-artifact`).
 
 ## Running
 
@@ -80,6 +81,14 @@ cargo run -p dark-forest -- --permissions-revoke remote-wasm
 cargo run -p dark-forest -- --permissions-revoke remote-wasm --capability net
 ```
 
+Creator tooling:
+
+```bash
+cargo run -p dark-forest -- --pack /path/to/game-dir
+cargo run -p dark-forest -- --pack /path/to/game-dir --out /tmp/sample-game-1.2.3.tar.gz --metadata-out /tmp/sample-game-1.2.3.metadata.json
+cargo run -p dark-forest -- --verify-artifact /tmp/sample-game-1.2.3.tar.gz --metadata /tmp/sample-game-1.2.3.metadata.json
+```
+
 ## Release Artifacts (v1.0.0)
 
 Tag-driven release builds publish:
@@ -100,6 +109,7 @@ Tag-driven release builds publish:
 - `crates/plugin-host`: entry type policy, Wasmtime runtime adapter, capability mediation, and prompt request contracts.
 - `crates/theme`: Forge theme tokens and style helpers.
 - `crates/diagnostics`: terminal and render diagnostics.
+- `crates/creator`: deterministic creator packaging (`pack`) and artifact verification (`verify-artifact`).
 
 ## Quality Standards
 

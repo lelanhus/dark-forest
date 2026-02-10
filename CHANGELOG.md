@@ -8,7 +8,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-_None yet._
+- `crates/creator` crate for creator-tooling package/verification workflows.
+- New creator CLI modes:
+  - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
+  - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
+- Deterministic `.tar.gz` packaging flow with normalized archive headers and stable file ordering.
+- Creator metadata sidecar JSON for packaged artifacts:
+  - `schema_version`
+  - `game_id`
+  - `version`
+  - `entry_type`
+  - `host_api`
+  - `artifact_file`
+  - `artifact_sha256`
+  - `artifact_size_bytes`
+  - `generated_at`
+
+### Changed
+
+- Roadmap milestone `M7` status moved from pending to in-progress with `pack/verify` foundation delivered.
 
 ## [1.0.0] - 2026-02-10
 

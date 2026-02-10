@@ -15,6 +15,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 content = { path = "../content" }
+creator = { path = "../creator" }
 diagnostics = { path = "../diagnostics" }
 games = { path = "../games" }
 registry = { path = "../registry" }
