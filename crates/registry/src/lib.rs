@@ -389,8 +389,8 @@ fn normalize_permission(value: serde_json::Value) -> Result<CapabilityGrant> {
                 serde_json::from_value(value).context("failed to parse permission object")?;
             let capability = parse_capability_label(&parsed.capability)?;
             let scope = match parsed.scope {
-                Some(raw_scope) => parse_scope_value(capability.clone(), &raw_scope)?,
-                None => default_scope(capability.clone()),
+                Some(raw_scope) => parse_scope_value(capability, &raw_scope)?,
+                None => default_scope(capability),
             };
             let decision = match parsed.decision {
                 Some(raw) => parse_decision_label(&raw)?,
@@ -416,8 +416,8 @@ fn normalize_legacy_permission(label: &str) -> Result<CapabilityGrant> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(raw_scope) => parse_scope_string(capability.clone(), raw_scope),
-        None => default_scope(capability.clone()),
+        Some(raw_scope) => parse_scope_string(capability, raw_scope),
+        None => default_scope(capability),
     };
 
     Ok(CapabilityGrant {

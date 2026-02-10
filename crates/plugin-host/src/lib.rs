@@ -1,11 +1,13 @@
 use std::cell::{Cell as ValueCell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::KeyCode;
 use runtime::{Game, InitCtx, RuntimeEvent, UpdateCtx};
 use serde::{Deserialize, Serialize};
-use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
+use wasmtime::{Engine, Linker, Module, Store, TypedFunc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -15,7 +17,7 @@ pub enum EntryType {
     Process,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     FsRead,
@@ -77,6 +79,37 @@ pub trait CapabilityEnforcer: Send + Sync {
     fn evaluate(&self, request: &CapabilityRequest) -> Result<CapabilityDecision>;
 }
 
+#[derive(Debug, Default)]
+pub struct DefaultCapabilityEnforcer;
+
+impl CapabilityEnforcer for DefaultCapabilityEnforcer {
+    fn evaluate(&self, request: &CapabilityRequest) -> Result<CapabilityDecision> {
+        let decision = match request.capability {
+            Capability::Clock | Capability::Random | Capability::TerminalRawInput => {
+                Decision::Allow
+            }
+            Capability::FsWrite | Capability::Net | Capability::OpenUrl | Capability::Clipboard => {
+                Decision::Deny
+            }
+            Capability::FsRead => Decision::Deny,
+        };
+
+        let reason = if decision == Decision::Allow {
+            Some("allowed by low-risk default policy".to_string())
+        } else if is_sensitive_capability(request.capability) {
+            Some("sensitive capability requires explicit grant".to_string())
+        } else {
+            Some("capability denied by default policy".to_string())
+        };
+
+        Ok(CapabilityDecision {
+            decision,
+            remembered: false,
+            reason,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub id: String,
@@ -103,6 +136,57 @@ pub fn validate_entry_type(
     }
 
     Ok(())
+}
+
+#[must_use]
+pub fn is_sensitive_capability(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::FsWrite | Capability::Net | Capability::OpenUrl | Capability::Clipboard
+    )
+}
+
+#[must_use]
+pub fn capability_label(capability: Capability) -> &'static str {
+    match capability {
+        Capability::FsRead => "fs.read",
+        Capability::FsWrite => "fs.write",
+        Capability::Net => "net",
+        Capability::OpenUrl => "open_url",
+        Capability::Clipboard => "clipboard",
+        Capability::Clock => "clock",
+        Capability::Random => "random",
+        Capability::TerminalRawInput => "terminal.raw_input",
+    }
+}
+
+#[must_use]
+pub fn capability_from_guest_id(raw: i32) -> Option<Capability> {
+    match raw {
+        1 => Some(Capability::FsRead),
+        2 => Some(Capability::FsWrite),
+        3 => Some(Capability::Net),
+        4 => Some(Capability::OpenUrl),
+        5 => Some(Capability::Clipboard),
+        6 => Some(Capability::Clock),
+        7 => Some(Capability::Random),
+        8 => Some(Capability::TerminalRawInput),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn capability_guest_id(capability: Capability) -> i32 {
+    match capability {
+        Capability::FsRead => 1,
+        Capability::FsWrite => 2,
+        Capability::Net => 3,
+        Capability::OpenUrl => 4,
+        Capability::Clipboard => 5,
+        Capability::Clock => 6,
+        Capability::Random => 7,
+        Capability::TerminalRawInput => 8,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +308,10 @@ pub struct WasmGameAdapter {
     name_static: &'static str,
     #[allow(dead_code)]
     manifest: PluginManifest,
+    #[allow(dead_code)]
+    declared_scopes: BTreeMap<Capability, Scope>,
+    #[allow(dead_code)]
+    enforcer: Arc<dyn CapabilityEnforcer>,
     store: RefCell<Store<()>>,
     init_func: TypedFunc<(i32, i32, i64), i32>,
     update_func: TypedFunc<(i32, i32, i32), i32>,
@@ -236,7 +324,20 @@ pub struct WasmGameAdapter {
 
 impl WasmGameAdapter {
     pub fn new(manifest: PluginManifest, artifact_root: PathBuf) -> Result<Self> {
+        Self::with_enforcer(manifest, artifact_root, Arc::new(DefaultCapabilityEnforcer))
+    }
+
+    pub fn with_enforcer(
+        manifest: PluginManifest,
+        artifact_root: PathBuf,
+        enforcer: Arc<dyn CapabilityEnforcer>,
+    ) -> Result<Self> {
         let entrypoint = resolve_wasm_entrypoint(&manifest, &artifact_root)?;
+        let declared_scopes = manifest
+            .permissions
+            .iter()
+            .map(|grant| (grant.capability, grant.scope.clone()))
+            .collect::<BTreeMap<_, _>>();
 
         let engine = Engine::default();
         let module = Module::from_file(&engine, &entrypoint.wasm_path).with_context(|| {
@@ -246,9 +347,41 @@ impl WasmGameAdapter {
             )
         })?;
 
+        let game_id = manifest.id.clone();
+        let declared_scopes_for_host = declared_scopes.clone();
+        let enforcer_for_host = Arc::clone(&enforcer);
         let mut store = Store::new(&engine, ());
-        let instance =
-            Instance::new(&mut store, &module, &[]).context("failed to instantiate WASM module")?;
+        let mut linker = Linker::new(&engine);
+        linker
+            .func_wrap(
+                "dark_forest",
+                "request_capability",
+                move |capability_raw: i32| -> i32 {
+                    let Some(capability) = capability_from_guest_id(capability_raw) else {
+                        return 0;
+                    };
+
+                    let Some(scope) = declared_scopes_for_host.get(&capability).cloned() else {
+                        return 0;
+                    };
+
+                    let request = CapabilityRequest {
+                        game_id: game_id.clone(),
+                        capability,
+                        scope,
+                    };
+
+                    match enforcer_for_host.evaluate(&request) {
+                        Ok(decision) if decision.decision == Decision::Allow => 1,
+                        _ => 0,
+                    }
+                },
+            )
+            .context("failed to register capability host import")?;
+
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .context("failed to instantiate WASM module")?;
 
         let init_func = instance
             .get_typed_func::<(i32, i32, i64), i32>(&mut store, "df_init")
@@ -273,6 +406,8 @@ impl WasmGameAdapter {
             id_static,
             name_static,
             manifest,
+            declared_scopes,
+            enforcer,
             store: RefCell::new(store),
             init_func,
             update_func,
@@ -388,10 +523,18 @@ mod tests {
     use runtime::{Frame, Game, InitCtx, RuntimeEvent, UpdateCtx};
 
     use super::{
-        Decision, EntryType, PluginManifest, Scope, WasmGameAdapter, resolve_wasm_entrypoint,
+        Capability, Decision, EntryType, PluginManifest, Scope, WasmGameAdapter,
+        capability_guest_id, resolve_wasm_entrypoint,
     };
 
     fn sample_manifest(entry: &str) -> PluginManifest {
+        sample_manifest_with_permissions(entry, vec![Capability::TerminalRawInput])
+    }
+
+    fn sample_manifest_with_permissions(
+        entry: &str,
+        permissions: Vec<Capability>,
+    ) -> PluginManifest {
         PluginManifest {
             id: "wasm-smoke".to_string(),
             name: "Wasm Smoke".to_string(),
@@ -400,11 +543,14 @@ mod tests {
             entry_type: EntryType::Wasm,
             entry: entry.to_string(),
             host_api: "^0.1".to_string(),
-            permissions: vec![super::CapabilityGrant {
-                capability: super::Capability::TerminalRawInput,
-                scope: Scope::None,
-                decision: Decision::Allow,
-            }],
+            permissions: permissions
+                .into_iter()
+                .map(|capability| super::CapabilityGrant {
+                    capability,
+                    scope: Scope::None,
+                    decision: Decision::Allow,
+                })
+                .collect(),
         }
     }
 
@@ -455,6 +601,38 @@ mod tests {
         Ok(())
     }
 
+    fn write_capability_probe_wasm(path: &Path, capability: Capability) -> anyhow::Result<()> {
+        let capability_id = capability_guest_id(capability);
+        let wat = format!(
+            r#"
+            (module
+              (import "dark_forest" "request_capability" (func $request_capability (param i32) (result i32)))
+              (global $allowed (mut i32) (i32.const 0))
+              (func (export "df_init") (param i32 i32 i64) (result i32)
+                (i32.const 0)
+              )
+              (func (export "df_update") (param i32 i32 i32) (result i32)
+                (i32.const {capability_id})
+                (call $request_capability)
+                (global.set $allowed)
+                (i32.const 0)
+              )
+              (func (export "df_cell") (param i32 i32) (result i32)
+                (global.get $allowed)
+                (if (result i32)
+                  (then (i32.const 89))
+                  (else (i32.const 78))
+                )
+              )
+            )
+            "#
+        );
+
+        let bytes = wat::parse_str(wat)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
     #[test]
     fn resolve_wasm_entrypoint_rejects_parent_path() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
@@ -485,6 +663,53 @@ mod tests {
         let first = frame.get(0, 0).unwrap_or_default();
         assert_eq!(first.glyph, 'W');
         assert!(adapter.score() >= 1);
+        Ok(())
+    }
+
+    #[test]
+    fn capability_request_is_denied_when_not_declared() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("game");
+        std::fs::create_dir_all(&root)?;
+        write_capability_probe_wasm(&root.join("main.wasm"), Capability::Clock)?;
+
+        let mut adapter = WasmGameAdapter::new(sample_manifest("main.wasm"), root)?;
+        adapter.init(&InitCtx {
+            width: 8,
+            height: 4,
+            seed: 11,
+        })?;
+
+        let mut update = UpdateCtx::new(8, 4);
+        adapter.update(RuntimeEvent::Tick { dt_ms: 16 }, &mut update)?;
+
+        let mut frame = Frame::new(8, 4);
+        adapter.render(&mut frame);
+        assert_eq!(frame.get(0, 0).unwrap_or_default().glyph, 'N');
+        Ok(())
+    }
+
+    #[test]
+    fn capability_request_is_allowed_when_declared_and_default_allowed() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("game");
+        std::fs::create_dir_all(&root)?;
+        write_capability_probe_wasm(&root.join("main.wasm"), Capability::Clock)?;
+
+        let manifest = sample_manifest_with_permissions("main.wasm", vec![Capability::Clock]);
+        let mut adapter = WasmGameAdapter::new(manifest, root)?;
+        adapter.init(&InitCtx {
+            width: 8,
+            height: 4,
+            seed: 11,
+        })?;
+
+        let mut update = UpdateCtx::new(8, 4);
+        adapter.update(RuntimeEvent::Tick { dt_ms: 16 }, &mut update)?;
+
+        let mut frame = Frame::new(8, 4);
+        adapter.render(&mut frame);
+        assert_eq!(frame.get(0, 0).unwrap_or_default().glyph, 'Y');
         Ok(())
     }
 }
