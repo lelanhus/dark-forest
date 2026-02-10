@@ -14,12 +14,25 @@ use thiserror::Error;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
+fn default_registry_scheme() -> String {
+    "index".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryConfig {
+    #[serde(default = "default_registry_scheme")]
+    pub scheme: String,
+    pub locator: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub schema_version: u32,
     pub theme: String,
     pub performance_mode: String,
     pub keymap_profile: String,
+    #[serde(default)]
+    pub registries: Vec<RegistryConfig>,
 }
 
 impl Default for Settings {
@@ -29,6 +42,7 @@ impl Default for Settings {
             theme: "forge".to_string(),
             performance_mode: "auto".to_string(),
             keymap_profile: "default".to_string(),
+            registries: Vec::new(),
         }
     }
 }
@@ -947,10 +961,37 @@ mod tests {
         let store = JsonContentStore::new(PathBuf::from(temp.path()));
         let mut settings = store.load_settings()?;
         settings.performance_mode = "60".to_string();
+        settings.registries = vec![super::RegistryConfig {
+            scheme: "index".to_string(),
+            locator: "file:///tmp/index.json".to_string(),
+        }];
         store.save_settings(&settings)?;
 
         let reloaded = store.load_settings()?;
         assert_eq!(reloaded.performance_mode, "60");
+        assert_eq!(reloaded.registries, settings.registries);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_settings_without_registries() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "schema_version": 2,
+                "theme": "forge",
+                "performance_mode": "auto",
+                "keymap_profile": "default"
+            }"#,
+        )?;
+
+        let settings = store.load_settings()?;
+        assert!(settings.registries.is_empty());
         Ok(())
     }
 

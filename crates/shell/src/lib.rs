@@ -79,6 +79,7 @@ pub enum ShellCommand {
     RestartGame,
     ToggleFullscreen,
     TogglePause,
+    InstallSelected(String),
     UpdateInstalled(String),
     RollbackInstalled(String),
     VerifyInstalled(String),
@@ -202,6 +203,12 @@ impl ShellState {
     pub fn set_installed_game_ids(&mut self, ids: Vec<String>) {
         self.installed_game_ids = ids;
         self.normalize_list_index();
+    }
+
+    fn is_installed_game_id(&self, id: &str) -> bool {
+        self.installed_game_ids
+            .iter()
+            .any(|installed| installed == id)
     }
 
     fn normalize_list_index(&mut self) {
@@ -560,6 +567,17 @@ impl ShellState {
                     .map(|id| vec![ShellCommand::UpdateInstalled(id)])
                     .unwrap_or_else(|| vec![ShellCommand::None])
             }
+            KeyCode::Char('i') | KeyCode::Char('I') if matches!(route, Route::Library) => {
+                if let Some(id) = selected_id {
+                    if self.is_installed_game_id(&id) {
+                        vec![ShellCommand::None]
+                    } else {
+                        vec![ShellCommand::InstallSelected(id)]
+                    }
+                } else {
+                    vec![ShellCommand::None]
+                }
+            }
             KeyCode::Char('b') | KeyCode::Char('B') if matches!(route, Route::Installed) => {
                 selected_id
                     .map(|id| vec![ShellCommand::RollbackInstalled(id)])
@@ -602,6 +620,9 @@ impl ShellState {
                     .any(|installed| installed == &id) =>
             {
                 vec![ShellCommand::RemoveInstalled(id)]
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') if !self.is_installed_game_id(&id) => {
+                vec![ShellCommand::InstallSelected(id)]
             }
             _ => vec![ShellCommand::None],
         }
@@ -1035,7 +1056,7 @@ fn render_detail(
                 if is_installed {
                     "\n- X: remove installed copy"
                 } else {
-                    ""
+                    "\n- [I] Install from registry"
                 }
             )
         },
@@ -1565,6 +1586,26 @@ mod tests {
     }
 
     #[test]
+    fn detail_screen_renders_install_action_for_non_installed_game() -> std::io::Result<()> {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "snake-plus".to_string(),
+        };
+
+        let context = RenderContext::default();
+
+        terminal.draw(|frame| {
+            render(frame, &state, &context);
+        })?;
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_buffer_contains(&buffer, "[I] Install");
+        Ok(())
+    }
+
+    #[test]
     fn installed_route_renders_version_and_actions() -> std::io::Result<()> {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend)?;
@@ -1659,6 +1700,74 @@ mod tests {
             commands,
             vec![ShellCommand::RemoveInstalled("snake-plus".to_string())]
         );
+    }
+
+    #[test]
+    fn library_install_key_emits_operation_for_non_installed_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Library;
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            commands,
+            vec![ShellCommand::InstallSelected("snake-plus".to_string())]
+        );
+    }
+
+    #[test]
+    fn library_install_key_ignores_installed_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Library;
+        state.set_installed_game_ids(vec!["snake-plus".to_string()]);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(commands, vec![ShellCommand::None]);
+    }
+
+    #[test]
+    fn detail_install_key_emits_operation_for_non_installed_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "snake-plus".to_string(),
+        };
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            commands,
+            vec![ShellCommand::InstallSelected("snake-plus".to_string())]
+        );
+    }
+
+    #[test]
+    fn detail_install_key_ignores_installed_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "snake-plus".to_string(),
+        };
+        state.set_installed_game_ids(vec!["snake-plus".to_string()]);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+
+        assert_eq!(commands, vec![ShellCommand::None]);
     }
 
     #[test]

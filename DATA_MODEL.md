@@ -120,6 +120,20 @@ Invariants:
 - Unknown settings keys must be preserved or explicitly dropped by migration policy.
 - Invalid enum values must fail validation and trigger safe fallback.
 
+## RegistryConfig
+
+Purpose: persisted marketplace registry source configuration.
+
+Fields:
+
+- `scheme: String` (currently `index`)
+- `locator: String` (provider locator accepted by `IndexRegistryProvider`, such as `file:///...`)
+
+Invariants:
+
+- Registry order is significant; first configured registry wins duplicate game ids.
+- Empty locators are invalid for command-driven configuration.
+
 ## PermissionsGrants
 
 Purpose: capability grants per game.

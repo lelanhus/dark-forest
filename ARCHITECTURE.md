@@ -56,6 +56,8 @@ Policy gates:
 - Backpressure handling is explicit (bounded queues + drop/merge policy for non-critical telemetry).
 - Content operations are serialized (single in-flight install/update/rollback/verify) via a dedicated worker queue.
 - Hot-load refresh uses polling (1s cadence) over installed-state and manifest files.
+- Marketplace catalog refresh runs in a background task (30s cadence) and posts non-blocking
+  catalog/error events into the UI loop.
 
 ## Failure Boundaries
 
