@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
-use creator::{PackRequest, VerifyRequest, pack_game, verify_artifact};
+use creator::{
+    PackRequest, PublishRequest, VerifyRequest, pack_game, publish_to_index, verify_artifact,
+};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -83,6 +85,11 @@ enum CreatorCommand {
         artifact_path: PathBuf,
         metadata_path: Option<PathBuf>,
     },
+    Publish {
+        artifact_path: PathBuf,
+        metadata_path: Option<PathBuf>,
+        index_locator: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +147,7 @@ impl CreatorCommand {
         match self {
             Self::Pack { .. } => "pack",
             Self::VerifyArtifact { .. } => "verify-artifact",
+            Self::Publish { .. } => "publish",
         }
     }
 }
@@ -187,6 +195,9 @@ impl CreatorCommandReport {
             version: Some(outcome.metadata.version),
             artifact_sha256: Some(outcome.metadata.artifact_sha256),
             artifact_size_bytes: Some(outcome.metadata.artifact_size_bytes),
+            index_path: None,
+            created_game: None,
+            created_version: None,
         }
     }
 
@@ -201,6 +212,26 @@ impl CreatorCommandReport {
             version: Some(outcome.version),
             artifact_sha256: Some(outcome.artifact_sha256),
             artifact_size_bytes: Some(outcome.artifact_size_bytes),
+            index_path: None,
+            created_game: None,
+            created_version: None,
+        }
+    }
+
+    fn success_publish(outcome: creator::PublishOutcome) -> Self {
+        Self {
+            command: "publish".to_string(),
+            success: true,
+            message: format!("published {}@{}", outcome.game_id, outcome.version),
+            artifact_path: Some(outcome.artifact_path),
+            metadata_path: None,
+            game_id: Some(outcome.game_id),
+            version: Some(outcome.version),
+            artifact_sha256: None,
+            artifact_size_bytes: None,
+            index_path: Some(outcome.index_path),
+            created_game: Some(outcome.created_game),
+            created_version: Some(outcome.created_version),
         }
     }
 
@@ -215,6 +246,9 @@ impl CreatorCommandReport {
             version: None,
             artifact_sha256: None,
             artifact_size_bytes: None,
+            index_path: None,
+            created_game: None,
+            created_version: None,
         }
     }
 }
@@ -246,6 +280,9 @@ struct CreatorCommandReport {
     version: Option<String>,
     artifact_sha256: Option<String>,
     artifact_size_bytes: Option<u64>,
+    index_path: Option<PathBuf>,
+    created_game: Option<bool>,
+    created_version: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -408,6 +445,9 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             );
             println!(
                 "  dark-forest --verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]"
+            );
+            println!(
+                "  dark-forest --publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]"
             );
             std::process::exit(0);
         }
@@ -640,6 +680,46 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 metadata_path,
             }))
         }
+        "--publish" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--publish requires <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]"
+                ));
+            }
+
+            let mut metadata_path = None;
+            let mut index_locator = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--metadata" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--metadata requires a value"));
+                        }
+                        metadata_path = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--index" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--index requires a value"));
+                        }
+                        index_locator = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --publish: {other}"));
+                    }
+                }
+            }
+
+            let index_locator =
+                index_locator.ok_or_else(|| anyhow!("--publish requires --index <locator>"))?;
+            Ok(LaunchMode::Creator(CreatorCommand::Publish {
+                artifact_path: PathBuf::from(&args[1]),
+                metadata_path,
+                index_locator,
+            }))
+        }
         other => Err(anyhow!("unknown argument: {other}")),
     }
 }
@@ -699,6 +779,18 @@ fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandRepo
             })?;
             Ok(CreatorCommandReport::success_verify(outcome))
         }
+        CreatorCommand::Publish {
+            artifact_path,
+            metadata_path,
+            index_locator,
+        } => {
+            let outcome = publish_to_index(&PublishRequest {
+                artifact_path,
+                metadata_path,
+                index_locator,
+            })?;
+            Ok(CreatorCommandReport::success_publish(outcome))
+        }
     }
 }
 
@@ -726,6 +818,15 @@ fn run_creator_cli(command: CreatorCommand) -> Result<()> {
     }
     if let Some(size) = report.artifact_size_bytes {
         println!("artifact.size_bytes={size}");
+    }
+    if let Some(path) = &report.index_path {
+        println!("index.path={}", path.display());
+    }
+    if let Some(created_game) = report.created_game {
+        println!("publish.created_game={created_game}");
+    }
+    if let Some(created_version) = report.created_version {
+        println!("publish.created_version={created_version}");
     }
 
     if report.success {
@@ -2606,6 +2707,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_publish_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--publish".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--metadata".to_string(),
+            "/tmp/out/sample-game-1.2.3.metadata.json".to_string(),
+        ])
+        .expect("publish mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Publish {
+                artifact_path: PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz"),
+                metadata_path: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.metadata.json")),
+                index_locator: "file:///tmp/index.json".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn pack_launch_mode_requires_game_dir() {
         let err = parse_launch_mode(vec!["--pack".to_string()]);
         assert!(err.is_err());
@@ -2632,6 +2755,33 @@ mod tests {
         let err = parse_launch_mode(vec![
             "--verify-artifact".to_string(),
             "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--nope".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn publish_launch_mode_requires_artifact_path() {
+        let err = parse_launch_mode(vec!["--publish".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn publish_launch_mode_requires_index_locator() {
+        let err = parse_launch_mode(vec![
+            "--publish".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn publish_launch_mode_rejects_unknown_argument() {
+        let err = parse_launch_mode(vec![
+            "--publish".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
             "--nope".to_string(),
         ]);
         assert!(err.is_err());

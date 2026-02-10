@@ -387,6 +387,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "flate2",
+ "plugin-host",
  "registry",
  "serde",
  "serde_json",

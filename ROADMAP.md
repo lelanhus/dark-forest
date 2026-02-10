@@ -152,6 +152,7 @@ Delivered so far:
 
 - CLI creator packaging workflow via `--pack` with deterministic archive output.
 - CLI artifact verification workflow via `--verify-artifact`.
+- CLI local index publish workflow via `--publish`.
 - `crates/creator` boundary introduced for creator-tooling APIs.
 
 Dependencies:
