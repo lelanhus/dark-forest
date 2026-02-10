@@ -26,6 +26,7 @@ pub enum Overlay {
     Notifications,
     Progress,
     ErrorDetail,
+    PermissionPrompt,
     RunnerPauseMenu,
     RunnerQuitConfirm,
     RunnerRestartConfirm,
@@ -42,6 +43,21 @@ pub struct GameStatsSummary {
 pub struct InstalledSummary {
     pub current_version: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PermissionAuditEntry {
+    pub game_id: String,
+    pub capability: String,
+    pub decision: String,
+    pub remembered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPromptState {
+    pub game_id: String,
+    pub capability: String,
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +84,16 @@ pub struct ShellState {
     pub command_palette_index: usize,
     pub search_query: String,
     pub installed_game_ids: Vec<String>,
+    pub permission_audit_entries: Vec<PermissionAuditEntry>,
+    pub permission_prompt: Option<PermissionPromptState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionPromptAction {
+    AllowOnce,
+    AllowAlways,
+    DenyOnce,
+    DenyAlways,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +110,11 @@ pub enum ShellCommand {
     RollbackInstalled(String),
     VerifyInstalled(String),
     RemoveInstalled(String),
+    RevokePermission {
+        game_id: String,
+        capability: Option<String>,
+    },
+    ResolvePermissionPrompt(PermissionPromptAction),
     SetOverlay(Option<Overlay>),
     CyclePerformance,
     None,
@@ -185,6 +216,8 @@ impl ShellState {
             command_palette_index: 0,
             search_query: String::new(),
             installed_game_ids: Vec::new(),
+            permission_audit_entries: Vec::new(),
+            permission_prompt: None,
         }
     }
 
@@ -203,6 +236,18 @@ impl ShellState {
     pub fn set_installed_game_ids(&mut self, ids: Vec<String>) {
         self.installed_game_ids = ids;
         self.normalize_list_index();
+    }
+
+    pub fn set_permission_audit_entries(&mut self, entries: Vec<PermissionAuditEntry>) {
+        self.permission_audit_entries = entries;
+        let max_index = self.permission_audit_entries.len();
+        if self.settings_index > max_index {
+            self.settings_index = max_index;
+        }
+    }
+
+    pub fn set_permission_prompt(&mut self, prompt: Option<PermissionPromptState>) {
+        self.permission_prompt = prompt;
     }
 
     fn is_installed_game_id(&self, id: &str) -> bool {
@@ -479,6 +524,25 @@ impl ShellState {
                     _ => vec![ShellCommand::None],
                 }
             }
+            Overlay::PermissionPrompt => match key.code {
+                KeyCode::Char('1') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                    vec![ShellCommand::ResolvePermissionPrompt(
+                        PermissionPromptAction::AllowOnce,
+                    )]
+                }
+                KeyCode::Char('2') => vec![ShellCommand::ResolvePermissionPrompt(
+                    PermissionPromptAction::AllowAlways,
+                )],
+                KeyCode::Char('3') | KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
+                    vec![ShellCommand::ResolvePermissionPrompt(
+                        PermissionPromptAction::DenyOnce,
+                    )]
+                }
+                KeyCode::Char('4') => vec![ShellCommand::ResolvePermissionPrompt(
+                    PermissionPromptAction::DenyAlways,
+                )],
+                _ => vec![ShellCommand::None],
+            },
             _ => match key.code {
                 KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
                 KeyCode::Char('n') if overlay == Overlay::Help => {
@@ -598,12 +662,45 @@ impl ShellState {
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Vec<ShellCommand> {
+        let total_items = 1 + self.permission_audit_entries.len();
         match key.code {
             KeyCode::Esc => vec![ShellCommand::OpenRoute(Route::Home)],
-            KeyCode::Enter | KeyCode::Char(' ') => vec![ShellCommand::CyclePerformance],
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
-                self.settings_index = 0;
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_index = (self.settings_index + 1) % total_items.max(1);
                 vec![ShellCommand::None]
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_index =
+                    (self.settings_index + total_items.max(1) - 1) % total_items.max(1);
+                vec![ShellCommand::None]
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.settings_index == 0 {
+                    vec![ShellCommand::CyclePerformance]
+                } else if let Some(entry) =
+                    self.permission_audit_entries.get(self.settings_index - 1)
+                {
+                    vec![ShellCommand::RevokePermission {
+                        game_id: entry.game_id.clone(),
+                        capability: Some(entry.capability.clone()),
+                    }]
+                } else {
+                    vec![ShellCommand::None]
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                if self.settings_index == 0 {
+                    vec![ShellCommand::None]
+                } else if let Some(entry) =
+                    self.permission_audit_entries.get(self.settings_index - 1)
+                {
+                    vec![ShellCommand::RevokePermission {
+                        game_id: entry.game_id.clone(),
+                        capability: Some(entry.capability.clone()),
+                    }]
+                } else {
+                    vec![ShellCommand::None]
+                }
             }
             _ => vec![ShellCommand::None],
         }
@@ -998,15 +1095,41 @@ fn render_installed(
 }
 
 fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState) {
-    let content = vec![
+    let mut content = vec![
         Line::from(Span::styled("Settings", title_style())),
         Line::from(""),
-        Line::from(format!("Performance: {}", state.performance_mode)),
-        Line::from(Span::styled(
-            "Press Enter to cycle Auto/60/30",
-            muted_style(),
-        )),
     ];
+    let perf_marker = if state.settings_index == 0 { ">" } else { " " };
+    content.push(Line::from(format!(
+        "{perf_marker} Performance: {} (Enter to cycle Auto/60/30)",
+        state.performance_mode
+    )));
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled(
+        "Permissions Audit (select entry and press Enter/X to revoke):",
+        muted_style(),
+    )));
+
+    if state.permission_audit_entries.is_empty() {
+        content.push(Line::from("  no remembered grants"));
+    } else {
+        for (idx, entry) in state.permission_audit_entries.iter().enumerate() {
+            let marker = if state.settings_index == idx + 1 {
+                ">"
+            } else {
+                " "
+            };
+            let memory = if entry.remembered {
+                "remembered"
+            } else {
+                "session"
+            };
+            content.push(Line::from(format!(
+                "{marker} {} :: {} ({}, {memory})",
+                entry.game_id, entry.capability, entry.decision
+            )));
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(content)
@@ -1210,7 +1333,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
         Overlay::Search => ("Search", search_overlay_body(state)),
         Overlay::Help => (
             "Help",
-            "Global: ↑/↓ or j/k, Enter, Esc, /, Ctrl+K, ?, Ctrl+Q\nRunner: P, R, F, Esc"
+            "Global: ↑/↓ or j/k, Enter, Esc, /, Ctrl+K, ?, Ctrl+Q\nRunner: P, R, F, Esc\nPermissions prompt: 1 Allow Once, 2 Allow Always, 3 Deny Once, 4 Deny Always"
                 .to_string(),
         ),
         Overlay::Notifications => (
@@ -1236,6 +1359,18 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
                 .clone()
                 .unwrap_or_else(|| "No error details available".to_string()),
         ),
+        Overlay::PermissionPrompt => {
+            let body = state.permission_prompt.clone().map_or_else(
+                || "No active permission request.".to_string(),
+                |prompt| {
+                    format!(
+                        "{}\n\nGame: {}\nCapability: {}\n\nChoose:\n1) Allow Once\n2) Allow Always\n3) Deny Once\n4) Deny Always",
+                        prompt.prompt, prompt.game_id, prompt.capability
+                    )
+                },
+            );
+            ("Permission Request", body)
+        }
         Overlay::RunnerPauseMenu => (
             "Paused",
             "Game paused.\n\nPress P or Enter to resume.\nPress R to restart (confirm).\nPress Q or Esc to exit (confirm).".to_string(),
@@ -1370,7 +1505,8 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::{
-        GameItem, GameStatsSummary, InstalledSummary, Overlay, RenderContext, Route, ShellCommand,
+        GameItem, GameStatsSummary, InstalledSummary, Overlay, PermissionAuditEntry,
+        PermissionPromptAction, PermissionPromptState, RenderContext, Route, ShellCommand,
         ShellState, render,
     };
 
@@ -1905,5 +2041,54 @@ mod tests {
             false,
         );
         assert_eq!(commands, vec![ShellCommand::None]);
+    }
+
+    #[test]
+    fn settings_route_emits_revoke_for_selected_permission_entry() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Settings;
+        state.set_permission_audit_entries(vec![PermissionAuditEntry {
+            game_id: "remote-wasm".to_string(),
+            capability: "net".to_string(),
+            decision: "allow".to_string(),
+            remembered: true,
+        }]);
+        state.settings_index = 1;
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            commands,
+            vec![ShellCommand::RevokePermission {
+                game_id: "remote-wasm".to_string(),
+                capability: Some("net".to_string())
+            }]
+        );
+    }
+
+    #[test]
+    fn permission_prompt_overlay_emits_decision_command() {
+        let mut state = ShellState::new(sample_games());
+        state.overlay = Some(Overlay::PermissionPrompt);
+        state.set_permission_prompt(Some(PermissionPromptState {
+            game_id: "remote-wasm".to_string(),
+            capability: "net".to_string(),
+            prompt: "Allow network?".to_string(),
+        }));
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::empty()),
+            true,
+            true,
+        );
+        assert_eq!(
+            commands,
+            vec![ShellCommand::ResolvePermissionPrompt(
+                PermissionPromptAction::AllowAlways
+            )]
+        );
     }
 }
