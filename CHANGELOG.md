@@ -13,6 +13,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
   - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
   - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
+  - `--dev <game_dir> --index <locator> [--out <artifact.tar.gz>]`
+    `[--metadata-out <metadata.json>] [--watch] [--interval-ms <ms>]`
+    `[--dry-run] [--replace]`
 - Deterministic `.tar.gz` packaging flow with normalized archive headers and stable file ordering.
 - Creator metadata sidecar JSON for packaged artifacts:
   - `schema_version`
@@ -28,10 +31,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   game/version entries.
 - Publish controls for dry-run planning and explicit replacement of existing version artifacts when
   checksums differ.
+- Creator dev loop API + CLI workflow that runs pack/verify/publish as one cycle or watches for
+  local file changes and repeats automatically.
+- Marketplace publish quality gates:
+  - reject manifests that do not declare a `permissions` field
+  - reject manifests whose `host_api` range is incompatible with host API `0.1.0`
+- Starter creator template scaffold at `templates/wasm-basic`.
+- Creator hot-reload documentation in `docs/CREATOR_WORKFLOW.md`.
 
 ### Changed
 
-- Roadmap milestone `M7` status moved from pending to in-progress with creator pack/verify/publish foundation delivered.
+- Roadmap milestone `M7` status moved to complete for creator pack/verify/publish/dev plus
+  template docs and marketplace quality gates.
 
 ## [1.0.0] - 2026-02-10
 

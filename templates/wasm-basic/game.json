@@ -1,0 +1,10 @@
+{
+  "id": "example-wasm-game",
+  "name": "Example WASM Game",
+  "version": "0.1.0",
+  "author": "Your Name",
+  "entry_type": "wasm",
+  "entry": "main.wasm",
+  "host_api": "^0.1",
+  "permissions": []
+}

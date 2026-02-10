@@ -7,11 +7,13 @@ use chrono::{DateTime, Utc};
 use flate2::{Compression, GzBuilder};
 use plugin_host::{Capability, Decision, EntryType, Scope};
 use registry::{parse_manifest, unpack_tarball_to_dir};
+use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType as TarEntryType, Header};
 
 pub const CREATOR_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_HOST_API_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRequest {
@@ -62,6 +64,23 @@ pub struct PublishOutcome {
     pub created_version: bool,
     pub replaced_existing_version: bool,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevRequest {
+    pub game_dir: PathBuf,
+    pub out: Option<PathBuf>,
+    pub metadata_out: Option<PathBuf>,
+    pub index_locator: String,
+    pub dry_run_publish: bool,
+    pub replace_existing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevCycleOutcome {
+    pub pack: PackOutcome,
+    pub verify: VerifyOutcome,
+    pub publish: PublishOutcome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -253,6 +272,12 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         metadata_path: request.metadata_path.clone(),
     })?;
 
+    let temp = tempfile::tempdir().context("failed to create temporary publish directory")?;
+    unpack_tarball_to_dir(&request.artifact_path, temp.path())
+        .with_context(|| format!("failed to unpack {}", request.artifact_path.display()))?;
+    let manifest = load_manifest(temp.path())?;
+    enforce_publish_quality_gates(temp.path(), &manifest)?;
+
     let index_path = locator_to_path(&request.index_locator);
     let index_dir = index_path
         .parent()
@@ -288,10 +313,6 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
     }
 
     let mut catalog = load_index_catalog(&index_path)?;
-    let temp = tempfile::tempdir().context("failed to create temporary publish directory")?;
-    unpack_tarball_to_dir(&request.artifact_path, temp.path())
-        .with_context(|| format!("failed to unpack {}", request.artifact_path.display()))?;
-    let manifest = load_manifest(temp.path())?;
 
     let summary = summarize_permissions(&manifest.permissions);
     let version_entry = IndexVersion {
@@ -373,6 +394,52 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
     })
 }
 
+pub fn run_dev_cycle(request: &DevRequest) -> Result<DevCycleOutcome> {
+    let pack = pack_game(&PackRequest {
+        game_dir: request.game_dir.clone(),
+        out: request.out.clone(),
+        metadata_out: request.metadata_out.clone(),
+    })?;
+    let verify = verify_artifact(&VerifyRequest {
+        artifact_path: pack.artifact_path.clone(),
+        metadata_path: Some(pack.metadata_path.clone()),
+    })?;
+    let publish = publish_to_index(&PublishRequest {
+        artifact_path: pack.artifact_path.clone(),
+        metadata_path: Some(pack.metadata_path.clone()),
+        index_locator: request.index_locator.clone(),
+        dry_run: request.dry_run_publish,
+        replace_existing: request.replace_existing,
+    })?;
+    Ok(DevCycleOutcome {
+        pack,
+        verify,
+        publish,
+    })
+}
+
+pub fn game_dir_signature(game_dir: &Path) -> Result<String> {
+    if !game_dir.exists() || !game_dir.is_dir() {
+        return Err(anyhow!("game directory is invalid: {}", game_dir.display()));
+    }
+
+    let mut files = Vec::new();
+    collect_regular_files(game_dir, game_dir, &mut files)?;
+    files.sort_by_key(|path| normalize_relative_path(path));
+
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let relative_normalized = normalize_relative_path(&relative);
+        hasher.update(relative_normalized.as_bytes());
+        hasher.update([0_u8]);
+        let bytes = fs::read(game_dir.join(&relative))
+            .with_context(|| format!("failed to read {}", game_dir.join(&relative).display()))?;
+        hasher.update(bytes);
+    }
+
+    Ok(to_hex_lower(&hasher.finalize()))
+}
+
 pub fn default_artifact_path(game_id: &str, version: &str) -> PathBuf {
     PathBuf::from("dist").join(format!("{game_id}-{version}.tar.gz"))
 }
@@ -405,6 +472,51 @@ fn load_manifest(game_dir: &Path) -> Result<registry::Manifest> {
         .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
     parse_manifest(&manifest_raw)
         .with_context(|| format!("failed to parse manifest {}", manifest_path.display()))
+}
+
+fn load_manifest_json(game_dir: &Path) -> Result<serde_json::Value> {
+    let manifest_path = game_dir.join("game.json");
+    let manifest_raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
+    serde_json::from_str(&manifest_raw)
+        .with_context(|| format!("failed to parse manifest json {}", manifest_path.display()))
+}
+
+fn enforce_publish_quality_gates(game_dir: &Path, manifest: &registry::Manifest) -> Result<()> {
+    let manifest_json = load_manifest_json(game_dir)?;
+    let object = manifest_json
+        .as_object()
+        .ok_or_else(|| anyhow!("manifest root must be a JSON object"))?;
+    let permissions = object.get("permissions").ok_or_else(|| {
+        anyhow!("manifest must declare a permissions field for marketplace publish")
+    })?;
+    if !permissions.is_array() {
+        return Err(anyhow!(
+            "manifest permissions field must be an array for marketplace publish"
+        ));
+    }
+
+    let host_api_range = VersionReq::parse(&manifest.host_api).with_context(|| {
+        format!(
+            "manifest host_api '{}' is not a valid semver range",
+            manifest.host_api
+        )
+    })?;
+    let host_version = Version::parse(CURRENT_HOST_API_VERSION).with_context(|| {
+        format!(
+            "current host api version '{}' is not valid semver",
+            CURRENT_HOST_API_VERSION
+        )
+    })?;
+    if !host_api_range.matches(&host_version) {
+        return Err(anyhow!(
+            "manifest host_api '{}' is incompatible with host api {}",
+            manifest.host_api,
+            CURRENT_HOST_API_VERSION
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_deterministic_tarball(game_dir: &Path) -> Result<Vec<u8>> {
@@ -703,8 +815,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        PackRequest, PublishRequest, VerifyRequest, default_artifact_path, default_metadata_path,
-        pack_game, publish_to_index, verify_artifact,
+        DevRequest, PackRequest, PublishRequest, VerifyRequest, default_artifact_path,
+        default_metadata_path, game_dir_signature, pack_game, publish_to_index, run_dev_cycle,
+        verify_artifact,
     };
 
     static TEST_CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -760,6 +873,50 @@ mod tests {
             "entry_type": "wasm",
             "entry": "main.wasm",
             "host_api": "^0.1",
+            "permissions": ["terminal.raw_input"]
+        });
+        fs::write(
+            game_dir.join("game.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
+    }
+
+    fn write_manifest_without_permissions(
+        game_dir: &Path,
+        game_id: &str,
+        version: &str,
+    ) -> Result<()> {
+        let manifest = serde_json::json!({
+            "id": game_id,
+            "name": "Sample Game",
+            "version": version,
+            "author": "Dark Forest",
+            "entry_type": "wasm",
+            "entry": "main.wasm",
+            "host_api": "^0.1"
+        });
+        fs::write(
+            game_dir.join("game.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
+    }
+
+    fn write_manifest_host_api(
+        game_dir: &Path,
+        game_id: &str,
+        version: &str,
+        host_api: &str,
+    ) -> Result<()> {
+        let manifest = serde_json::json!({
+            "id": game_id,
+            "name": "Sample Game",
+            "version": version,
+            "author": "Dark Forest",
+            "entry_type": "wasm",
+            "entry": "main.wasm",
+            "host_api": host_api,
             "permissions": ["terminal.raw_input"]
         });
         fs::write(
@@ -1111,6 +1268,117 @@ mod tests {
     }
 
     #[test]
+    fn publish_fails_when_manifest_permissions_not_declared() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        write_manifest_without_permissions(&game_dir, "sample-game", "1.2.3")?;
+
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let index_path = temp.path().join("registry").join("index.json");
+        let result = publish_to_index(&PublishRequest {
+            artifact_path: artifact_path.clone(),
+            metadata_path: Some(metadata_path),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
+        });
+        assert!(result.is_err());
+        assert!(!index_path.exists());
+        assert!(
+            !temp
+                .path()
+                .join("registry")
+                .join("sample-game-1.2.3.tar.gz")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn publish_fails_when_manifest_host_api_is_incompatible() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        write_manifest_host_api(&game_dir, "sample-game", "1.2.3", ">=2.0.0")?;
+
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let index_path = temp.path().join("registry").join("index.json");
+        let result = publish_to_index(&PublishRequest {
+            artifact_path: artifact_path.clone(),
+            metadata_path: Some(metadata_path),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
+        });
+        assert!(result.is_err());
+        assert!(!index_path.exists());
+        assert!(
+            !temp
+                .path()
+                .join("registry")
+                .join("sample-game-1.2.3.tar.gz")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn publish_fails_when_manifest_host_api_is_invalid() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        write_manifest_host_api(&game_dir, "sample-game", "1.2.3", "not-a-range")?;
+
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let index_path = temp.path().join("registry").join("index.json");
+        let result = publish_to_index(&PublishRequest {
+            artifact_path: artifact_path.clone(),
+            metadata_path: Some(metadata_path),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
+        });
+        assert!(result.is_err());
+        assert!(!index_path.exists());
+        assert!(
+            !temp
+                .path()
+                .join("registry")
+                .join("sample-game-1.2.3.tar.gz")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn publish_replace_overwrites_existing_version_checksum() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
@@ -1177,6 +1445,43 @@ mod tests {
             .expect("checksum must be present");
         assert_ne!(checksum, pack_v1.metadata.artifact_sha256);
         assert_eq!(checksum, pack_v2.metadata.artifact_sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn run_dev_cycle_packs_verifies_and_publishes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let index_path = temp.path().join("registry").join("index.json");
+
+        let outcome = run_dev_cycle(&DevRequest {
+            game_dir,
+            out: Some(temp.path().join("dist").join("sample-game-1.2.3.tar.gz")),
+            metadata_out: Some(
+                temp.path()
+                    .join("dist")
+                    .join("sample-game-1.2.3.metadata.json"),
+            ),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run_publish: false,
+            replace_existing: false,
+        })?;
+
+        assert_eq!(outcome.pack.metadata.game_id, "sample-game");
+        assert_eq!(outcome.verify.game_id, "sample-game");
+        assert_eq!(outcome.publish.game_id, "sample-game");
+        assert!(index_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn game_dir_signature_changes_when_content_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let before = game_dir_signature(&game_dir)?;
+        write_wasm_payload(&game_dir, b"changed payload bytes")?;
+        let after = game_dir_signature(&game_dir)?;
+        assert_ne!(before, after);
         Ok(())
     }
 }

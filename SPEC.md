@@ -441,6 +441,11 @@ Core entities:
 * determinism tests (optional but encouraged)
 * performance budget checks (frame time)
 
+Current CLI enforcement in creator `publish`:
+
+* `permissions` must be explicitly declared in `game.json` (array form)
+* `host_api` must be a valid semver range compatible with host API `0.1.0`
+
 ---
 
 ## 16) Testing and quality strategy

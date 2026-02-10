@@ -20,7 +20,7 @@ Source of product scope: `SPEC.md`.
 - M4 Local Installs + Hot-load (`v0.2`): Complete
 - M5 First Remote Provider (`v0.3`): Complete
 - M6 Permission Enforcement and WASM Plugins (`v1.0`): Complete
-- M7 Creator Tooling (`v1.1+`): In Progress (pack/verify foundation delivered)
+- M7 Creator Tooling (`v1.1+`): Complete
 - M8+ : Pending
 
 ## M0 - Foundation (Complete)
@@ -138,7 +138,7 @@ Dependencies:
 
 - M5.
 
-## M7 - Creator Tooling (v1.1+, In Progress)
+## M7 - Creator Tooling (v1.1+, Complete)
 
 Objective: accelerate ecosystem growth safely.
 
@@ -154,7 +154,14 @@ Delivered so far:
 - CLI artifact verification workflow via `--verify-artifact`.
 - CLI local index publish workflow via `--publish`.
 - Publish ergonomics: `--dry-run` planning and `--replace` for explicit version replacement.
+- CLI creator dev workflow via `--dev` (single cycle and watch mode).
 - `crates/creator` boundary introduced for creator-tooling APIs.
+- Publish quality gates:
+  - manifest must declare `permissions` explicitly for marketplace publication
+  - manifest `host_api` semver range must be compatible with host API `0.1.0`
+- Starter template and creator hot-reload path documented:
+  - `templates/wasm-basic`
+  - `docs/CREATOR_WORKFLOW.md`
 
 Dependencies:
 

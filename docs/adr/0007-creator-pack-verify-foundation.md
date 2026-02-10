@@ -27,6 +27,9 @@ registry/runtime code paths that solve different problems.
    - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
    - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
      (local index only)
+   - `--dev <game_dir> --index <locator> [--out <artifact.tar.gz>]`
+     `[--metadata-out <metadata.json>] [--watch] [--interval-ms <ms>]`
+     `[--dry-run] [--replace]`
 3. `pack` produces:
    - deterministic `.tar.gz` artifact with stable lexical file ordering
    - normalized archive header fields for byte-repeatability
@@ -39,7 +42,12 @@ registry/runtime code paths that solve different problems.
    directory, and upserts index catalog entries for game/version.
 6. `publish --dry-run` computes and reports publish effects without mutating artifact/index files.
 7. `publish --replace` explicitly allows replacing an existing game/version entry when checksums differ.
-8. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
+8. `dev` orchestrates pack/verify/publish as a single command and supports watch mode using
+   game-directory signatures to trigger repeat cycles.
+9. Keep scope CLI-only for this slice; no interactive shell creator routes in `M7` slice 1.
+10. `publish` enforces marketplace quality gates before any index/artifact mutation:
+    - manifest must declare a `permissions` field (array form)
+    - manifest `host_api` semver range must match host API `0.1.0`
 
 ## Alternatives Considered
 
@@ -70,15 +78,16 @@ Operational impact:
 
 - `README.md`, `ROADMAP.md`, and `DATA_MODEL.md` must track creator metadata + CLI behavior.
 - Local publish flow reuses creator metadata instead of recomputing package facts.
+- Creator templates and hot-reload docs are tracked in `templates/` + `docs/CREATOR_WORKFLOW.md`.
 
 ## Validation
 
 - Unit tests in `crates/creator` cover pack output, determinism, verify success/failure, and local
-  index publish behavior.
-- App CLI parsing tests cover `--pack`, `--verify-artifact`, and `--publish` command surfaces.
+  index publish behavior plus dev-cycle orchestration.
+- App CLI parsing tests cover `--pack`, `--verify-artifact`, `--publish`, and `--dev` command surfaces.
 - Full local quality gates remain required (`make ci`).
 
 ## Follow-up
 
 - Define signing model and verification extensions for marketplace trust requirements.
-- Add `dev` hot-reload flow and templates to complete remaining `M7` exit criteria.
+- Evaluate interactive shell creator routes after CLI creator workflows.
