@@ -22,7 +22,7 @@ use games::builtin_catalog;
 use plugin_host::{
     Capability, CapabilityDecision, CapabilityEnforcer, CapabilityRequest, Decision,
     PermissionPromptRequest, PluginManifest, Scope, WasmGameAdapter, capability_label,
-    validate_entry_type,
+    is_sensitive_capability, validate_entry_type,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -175,6 +175,7 @@ struct AppCapabilityEnforcer {
     permissions: std::sync::Arc<std::sync::Mutex<content::PermissionsFile>>,
     session_decisions: std::sync::Arc<std::sync::Mutex<BTreeMap<(String, Capability), Decision>>>,
     prompt_queue: std::sync::Arc<std::sync::Mutex<Vec<PermissionPromptRequest>>>,
+    prompt_sensitive_only: bool,
 }
 
 impl CapabilityEnforcer for AppCapabilityEnforcer {
@@ -202,38 +203,47 @@ impl CapabilityEnforcer for AppCapabilityEnforcer {
             });
         }
 
-        let default_decision = match request.capability {
-            Capability::Clock | Capability::Random | Capability::TerminalRawInput => {
-                Decision::Allow
-            }
-            Capability::FsWrite | Capability::Net | Capability::OpenUrl | Capability::Clipboard => {
-                if let Ok(mut queue) = self.prompt_queue.lock() {
-                    let already_queued = queue.iter().any(|existing| {
-                        existing.game_id == request.game_id
-                            && existing.capability == request.capability
+        let is_low_risk = matches!(
+            request.capability,
+            Capability::Clock | Capability::Random | Capability::TerminalRawInput
+        );
+        let should_prompt = if self.prompt_sensitive_only {
+            is_sensitive_capability(request.capability)
+        } else {
+            true
+        };
+
+        let default_decision = if should_prompt {
+            if let Ok(mut queue) = self.prompt_queue.lock() {
+                let already_queued = queue.iter().any(|existing| {
+                    existing.game_id == request.game_id && existing.capability == request.capability
+                });
+                if !already_queued {
+                    queue.push(PermissionPromptRequest {
+                        game_id: request.game_id.clone(),
+                        capability: request.capability,
+                        scope: request.scope.clone(),
+                        prompt: format!(
+                            "Allow capability '{}' for {}?",
+                            capability_label(request.capability),
+                            request.game_id
+                        ),
                     });
-                    if !already_queued {
-                        queue.push(PermissionPromptRequest {
-                            game_id: request.game_id.clone(),
-                            capability: request.capability,
-                            scope: request.scope.clone(),
-                            prompt: format!(
-                                "Allow capability '{}' for {}?",
-                                capability_label(request.capability),
-                                request.game_id
-                            ),
-                        });
-                    }
                 }
-                Decision::Deny
             }
-            Capability::FsRead => Decision::Deny,
+            Decision::Deny
+        } else if is_low_risk {
+            Decision::Allow
+        } else {
+            Decision::Deny
         };
 
         let reason = if default_decision == Decision::Allow {
             Some("default low-risk capability policy".to_string())
-        } else {
+        } else if should_prompt {
             Some("default deny until explicit decision".to_string())
+        } else {
+            Some("capability denied by default policy".to_string())
         };
 
         Ok(CapabilityDecision {
@@ -1514,6 +1524,7 @@ impl AppModel {
             permissions: std::sync::Arc::clone(&self.shared_permissions),
             session_decisions: std::sync::Arc::clone(&self.session_permission_decisions),
             prompt_queue: std::sync::Arc::clone(&self.permission_prompt_queue),
+            prompt_sensitive_only: self.settings.security_toggles.prompt_sensitive_only,
         });
         match create_game_instance_with_enforcer(
             self.store.root(),
@@ -2135,11 +2146,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use content::ContentStore;
-    use plugin_host::{Capability, Decision, Scope};
+    use plugin_host::{Capability, CapabilityEnforcer, CapabilityRequest, Decision, Scope};
     use shell::{Overlay, Route, ShellCommand};
 
     use super::{
-        ContentOperation, LaunchMode, PermissionsCommand, RegistryCommand,
+        AppCapabilityEnforcer, ContentOperation, LaunchMode, PermissionsCommand, RegistryCommand,
         compute_hotload_signature, create_game_instance, execute_content_operation,
         execute_permissions_command, execute_registry_command, load_marketplace_catalog,
         parse_launch_mode, should_forward_key_to_runner, should_render_frame,
@@ -2191,6 +2202,20 @@ mod tests {
         Ok(())
     }
 
+    fn make_enforcer(prompt_sensitive_only: bool) -> AppCapabilityEnforcer {
+        AppCapabilityEnforcer {
+            permissions: std::sync::Arc::new(std::sync::Mutex::new(content::PermissionsFile {
+                schema_version: content::CURRENT_SCHEMA_VERSION,
+                grants: std::collections::BTreeMap::new(),
+            })),
+            session_decisions: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
+            prompt_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            prompt_sensitive_only,
+        }
+    }
+
     #[test]
     fn render_scheduler_waits_until_target_duration() {
         let last = Instant::now();
@@ -2203,6 +2228,66 @@ mod tests {
         let last = Instant::now();
         let now = last + Duration::from_millis(16);
         assert!(should_render_frame(last, now, Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn capability_enforcer_prompts_sensitive_capabilities_by_default() {
+        let enforcer = make_enforcer(true);
+        let request = CapabilityRequest {
+            game_id: "remote-wasm".to_string(),
+            capability: Capability::Net,
+            scope: Scope::Prompt,
+        };
+
+        let decision = enforcer
+            .evaluate(&request)
+            .expect("capability evaluation should succeed");
+        assert_eq!(decision.decision, Decision::Deny);
+        let queue = enforcer
+            .prompt_queue
+            .lock()
+            .expect("queue lock should succeed");
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn capability_enforcer_allows_low_risk_when_prompt_sensitive_only() {
+        let enforcer = make_enforcer(true);
+        let request = CapabilityRequest {
+            game_id: "remote-wasm".to_string(),
+            capability: Capability::Clock,
+            scope: Scope::None,
+        };
+
+        let decision = enforcer
+            .evaluate(&request)
+            .expect("capability evaluation should succeed");
+        assert_eq!(decision.decision, Decision::Allow);
+        let queue = enforcer
+            .prompt_queue
+            .lock()
+            .expect("queue lock should succeed");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn capability_enforcer_prompts_low_risk_when_prompt_all_enabled() {
+        let enforcer = make_enforcer(false);
+        let request = CapabilityRequest {
+            game_id: "remote-wasm".to_string(),
+            capability: Capability::Clock,
+            scope: Scope::None,
+        };
+
+        let decision = enforcer
+            .evaluate(&request)
+            .expect("capability evaluation should succeed");
+        assert_eq!(decision.decision, Decision::Deny);
+        let queue = enforcer
+            .prompt_queue
+            .lock()
+            .expect("queue lock should succeed");
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

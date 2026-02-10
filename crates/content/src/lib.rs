@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
-use plugin_host::{Capability, Decision, Scope};
+use plugin_host::{Capability, CapabilityGrant, Decision, Scope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -16,6 +16,24 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 fn default_registry_scheme() -> String {
     "index".to_string()
+}
+
+fn default_prompt_sensitive_only() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityToggles {
+    #[serde(default = "default_prompt_sensitive_only")]
+    pub prompt_sensitive_only: bool,
+}
+
+impl Default for SecurityToggles {
+    fn default() -> Self {
+        Self {
+            prompt_sensitive_only: default_prompt_sensitive_only(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +51,8 @@ pub struct Settings {
     pub keymap_profile: String,
     #[serde(default)]
     pub registries: Vec<RegistryConfig>,
+    #[serde(default)]
+    pub security_toggles: SecurityToggles,
 }
 
 impl Default for Settings {
@@ -43,6 +63,7 @@ impl Default for Settings {
             performance_mode: "auto".to_string(),
             keymap_profile: "default".to_string(),
             registries: Vec::new(),
+            security_toggles: SecurityToggles::default(),
         }
     }
 }
@@ -306,6 +327,7 @@ impl JsonContentStore {
             .map_err(ContentTransactionError::Other)?;
 
         validate_artifact_manifest(&request.artifact_dir, &request.game_id, &request.version)?;
+        let declared_permissions = load_manifest_permissions(&request.artifact_dir)?;
 
         let stage_dir = self
             .tmp_dir()
@@ -351,11 +373,20 @@ impl JsonContentStore {
         let mut installed = self
             .load_installed()
             .map_err(ContentTransactionError::Other)?;
+        let previous_installed = installed.clone();
         let prior_current = installed
             .installed
             .iter()
             .find(|record| record.id == request.game_id)
             .map(|record| record.current_version.clone());
+        let mut next_permissions = self
+            .load_permissions()
+            .map_err(ContentTransactionError::Other)?;
+        reconcile_permissions_for_manifest(
+            &mut next_permissions,
+            &request.game_id,
+            &declared_permissions,
+        );
 
         let record = upsert_installed_record(&mut installed, &request.game_id, &request.source);
         record.push_version(&request.version);
@@ -367,7 +398,15 @@ impl JsonContentStore {
             .map_err(ContentTransactionError::Other)?;
 
         if let Err(err) = self.save_installed(&installed) {
-            if let Some(previous) = prior_current {
+            if let Some(previous) = prior_current.clone() {
+                let _ = self.write_current_pointer(&request.game_id, &previous);
+            }
+            return Err(ContentTransactionError::Other(err));
+        }
+
+        if let Err(err) = self.save_permissions(&next_permissions) {
+            let _ = self.save_installed(&previous_installed);
+            if let Some(previous) = prior_current.clone() {
                 let _ = self.write_current_pointer(&request.game_id, &previous);
             }
             return Err(ContentTransactionError::Other(err));
@@ -870,6 +909,75 @@ fn validate_artifact_manifest(
     Ok(())
 }
 
+fn load_manifest_permissions(
+    artifact_dir: &Path,
+) -> std::result::Result<Vec<CapabilityGrant>, ContentTransactionError> {
+    let manifest_path = artifact_dir.join("game.json");
+    let raw = fs::read_to_string(&manifest_path).map_err(|err| {
+        ContentTransactionError::Other(anyhow!(
+            "failed to read artifact manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+
+    let parsed = registry::parse_manifest(&raw).map_err(|err| {
+        ContentTransactionError::Other(anyhow!(
+            "failed to parse artifact permissions from {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    Ok(parsed.permissions)
+}
+
+fn reconcile_permissions_for_manifest(
+    permissions: &mut PermissionsFile,
+    game_id: &str,
+    declared_permissions: &[CapabilityGrant],
+) {
+    let Some(existing) = permissions.grants.get_mut(game_id) else {
+        return;
+    };
+
+    let declared_by_capability = declared_permissions
+        .iter()
+        .map(|grant| (grant.capability, grant.scope.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    existing.retain(|grant| {
+        let Some(declared_scope) = declared_by_capability.get(&grant.capability) else {
+            return false;
+        };
+        is_scope_compatible(&grant.scope, declared_scope)
+    });
+
+    if existing.is_empty() {
+        permissions.grants.remove(game_id);
+    }
+}
+
+fn is_scope_compatible(granted: &Scope, declared: &Scope) -> bool {
+    match (granted, declared) {
+        (Scope::None, Scope::None) => true,
+        (Scope::Prompt, Scope::Prompt) => true,
+        (Scope::Path(path), Scope::Path(expected)) => path == expected,
+        (Scope::Path(path), Scope::Paths(declared_paths)) => {
+            declared_paths.iter().any(|item| item == path)
+        }
+        (Scope::Paths(granted_paths), Scope::Path(declared_path)) => {
+            granted_paths.iter().all(|path| path == declared_path)
+        }
+        (Scope::Paths(granted_paths), Scope::Paths(declared_paths)) => granted_paths
+            .iter()
+            .all(|path| declared_paths.iter().any(|allowed| allowed == path)),
+        (Scope::Allowlist(granted_allowlist), Scope::Allowlist(declared_allowlist)) => {
+            granted_allowlist
+                .iter()
+                .all(|entry| declared_allowlist.iter().any(|allowed| allowed == entry))
+        }
+        _ => false,
+    }
+}
+
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     if !source.exists() || !source.is_dir() {
         return Err(anyhow!("source directory is invalid: {}", source.display()));
@@ -961,6 +1069,7 @@ mod tests {
         let store = JsonContentStore::new(PathBuf::from(temp.path()));
         let mut settings = store.load_settings()?;
         settings.performance_mode = "60".to_string();
+        settings.security_toggles.prompt_sensitive_only = false;
         settings.registries = vec![super::RegistryConfig {
             scheme: "index".to_string(),
             locator: "file:///tmp/index.json".to_string(),
@@ -970,6 +1079,7 @@ mod tests {
         let reloaded = store.load_settings()?;
         assert_eq!(reloaded.performance_mode, "60");
         assert_eq!(reloaded.registries, settings.registries);
+        assert!(!reloaded.security_toggles.prompt_sensitive_only);
         Ok(())
     }
 
@@ -992,6 +1102,32 @@ mod tests {
 
         let settings = store.load_settings()?;
         assert!(settings.registries.is_empty());
+        assert!(settings.security_toggles.prompt_sensitive_only);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_settings_without_security_toggles() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "schema_version": 2,
+                "theme": "forge",
+                "performance_mode": "30",
+                "keymap_profile": "default",
+                "registries": [{"scheme":"index","locator":"file:///tmp/index.json"}]
+            }"#,
+        )?;
+
+        let settings = store.load_settings()?;
+        assert_eq!(settings.performance_mode, "30");
+        assert_eq!(settings.registries.len(), 1);
+        assert!(settings.security_toggles.prompt_sensitive_only);
         Ok(())
     }
 
@@ -1332,7 +1468,151 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn update_drops_grants_for_removed_capabilities() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(temp.path().to_path_buf());
+        store.ensure_layout()?;
+
+        let artifact_v1 = create_artifact_dir_with_permissions(
+            temp.path(),
+            "remote-wasm",
+            "0.1.0",
+            serde_json::json!(["terminal.raw_input", "net"]),
+        )?;
+        let _ = store.install_from_directory(&InstallRequest {
+            game_id: "remote-wasm".to_string(),
+            version: "0.1.0".to_string(),
+            source: "index://fixture".to_string(),
+            artifact_dir: artifact_v1,
+            expected_sha256: None,
+        })?;
+
+        let mut permissions = store.load_permissions()?;
+        permissions.grants.insert(
+            "remote-wasm".to_string(),
+            vec![
+                PermissionGrant {
+                    capability: Capability::TerminalRawInput,
+                    scope: Scope::None,
+                    decision: Decision::Allow,
+                    remembered: true,
+                    granted_at: chrono::Utc::now(),
+                },
+                PermissionGrant {
+                    capability: Capability::Net,
+                    scope: Scope::Allowlist(Vec::new()),
+                    decision: Decision::Allow,
+                    remembered: true,
+                    granted_at: chrono::Utc::now(),
+                },
+            ],
+        );
+        store.save_permissions(&permissions)?;
+
+        let artifact_v2 = create_artifact_dir_with_permissions(
+            temp.path(),
+            "remote-wasm",
+            "0.2.0",
+            serde_json::json!(["terminal.raw_input"]),
+        )?;
+        let _ = store.install_from_directory(&InstallRequest {
+            game_id: "remote-wasm".to_string(),
+            version: "0.2.0".to_string(),
+            source: "index://fixture".to_string(),
+            artifact_dir: artifact_v2,
+            expected_sha256: None,
+        })?;
+
+        let reloaded = store.load_permissions()?;
+        let grants = reloaded
+            .grants
+            .get("remote-wasm")
+            .ok_or_else(|| anyhow!("missing grants"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].capability, Capability::TerminalRawInput);
+        Ok(())
+    }
+
+    #[test]
+    fn update_preserves_grants_with_compatible_scope() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(temp.path().to_path_buf());
+        store.ensure_layout()?;
+
+        let declared_permission = serde_json::json!([
+            {"capability":"net","scope":["api.example.com"]}
+        ]);
+        let artifact_v1 = create_artifact_dir_with_permissions(
+            temp.path(),
+            "remote-wasm",
+            "0.1.0",
+            declared_permission.clone(),
+        )?;
+        let _ = store.install_from_directory(&InstallRequest {
+            game_id: "remote-wasm".to_string(),
+            version: "0.1.0".to_string(),
+            source: "index://fixture".to_string(),
+            artifact_dir: artifact_v1,
+            expected_sha256: None,
+        })?;
+
+        let mut permissions = store.load_permissions()?;
+        permissions.grants.insert(
+            "remote-wasm".to_string(),
+            vec![PermissionGrant {
+                capability: Capability::Net,
+                scope: Scope::Allowlist(vec!["api.example.com".to_string()]),
+                decision: Decision::Allow,
+                remembered: true,
+                granted_at: chrono::Utc::now(),
+            }],
+        );
+        store.save_permissions(&permissions)?;
+
+        let artifact_v2 = create_artifact_dir_with_permissions(
+            temp.path(),
+            "remote-wasm",
+            "0.2.0",
+            declared_permission,
+        )?;
+        let _ = store.install_from_directory(&InstallRequest {
+            game_id: "remote-wasm".to_string(),
+            version: "0.2.0".to_string(),
+            source: "index://fixture".to_string(),
+            artifact_dir: artifact_v2,
+            expected_sha256: None,
+        })?;
+
+        let reloaded = store.load_permissions()?;
+        let grants = reloaded
+            .grants
+            .get("remote-wasm")
+            .ok_or_else(|| anyhow!("missing grants"))?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].capability, Capability::Net);
+        assert_eq!(
+            grants[0].scope,
+            Scope::Allowlist(vec!["api.example.com".to_string()])
+        );
+        Ok(())
+    }
+
     fn create_artifact_dir(root: &Path, id: &str, version: &str) -> Result<PathBuf> {
+        create_artifact_dir_with_permissions(
+            root,
+            id,
+            version,
+            serde_json::json!(["terminal.raw_input"]),
+        )
+    }
+
+    fn create_artifact_dir_with_permissions(
+        root: &Path,
+        id: &str,
+        version: &str,
+        permissions: serde_json::Value,
+    ) -> Result<PathBuf> {
         let dir = root.join(format!("artifact-{id}-{version}"));
         std::fs::create_dir_all(&dir)?;
 
@@ -1344,7 +1624,7 @@ mod tests {
             "entry_type": "wasm",
             "entry": "main.wasm",
             "host_api": "^0.1",
-            "permissions": ["terminal.raw_input"]
+            "permissions": permissions
         });
 
         std::fs::write(dir.join("game.json"), serde_json::to_vec_pretty(&manifest)?)?;
