@@ -119,6 +119,7 @@ Invariants:
 
 - Unknown settings keys must be preserved or explicitly dropped by migration policy.
 - Invalid enum values must fail validation and trigger safe fallback.
+- `security_toggles.prompt_sensitive_only` defaults to `true` when missing.
 
 ## RegistryConfig
 
@@ -133,6 +134,20 @@ Invariants:
 
 - Registry order is significant; first configured registry wins duplicate game ids.
 - Empty locators are invalid for command-driven configuration.
+
+## SecurityToggles
+
+Purpose: persisted prompt policy controls for runtime capability decisions.
+
+Fields:
+
+- `prompt_sensitive_only: bool`
+
+Invariants:
+
+- Default value is `true` for backward-compatible settings loads.
+- When `true`, first-use prompts are limited to sensitive capabilities (`fs.write`, `net`, `open_url`, `clipboard`).
+- When `false`, host policy may prompt for any declared capability before grant.
 
 ## PermissionsGrants
 

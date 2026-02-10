@@ -7,9 +7,9 @@ and safe by default, including on Raspberry Pi-class hardware.
 
 ## Status
 
-Dark Forest is at first release scope (`v0.1.0`).
+Dark Forest is at `v1.0.0`.
 
-Implemented in `v0.1.0`:
+Implemented in `v1.0.0`:
 
 - Shell routes: Home, Library, Installed, Settings, Game Detail, Runner.
 - Global overlays: command palette (`Ctrl+K`), contextual search (`/`), help (`?`), notifications, progress, and error detail.
@@ -30,6 +30,13 @@ Implemented post-`v0.1.0` (current workspace):
 - Settings-backed registry configuration (`--registry-list`, `--registry-add`, `--registry-remove`).
 - Asynchronous marketplace catalog refresh in interactive mode from configured `index` registries.
 - Explicit remote install action in Library/Game Detail via `I` for non-installed marketplace entries.
+- HTTP/HTTPS `index://` catalog loading with retry and deterministic cache fallback.
+- Manifest-driven launch resolver for installed third-party entries.
+- Third-party `entry_type=wasm` runtime integration via Wasmtime.
+- Host-boundary capability enforcement for WASM guest capability requests.
+- Permission prompt flow (`Allow Once`, `Allow Always`, `Deny Once`, `Deny Always`) with remembered decisions.
+- Permission audit/revoke in Settings and CLI parity (`--permissions-list`, `--permissions-revoke`).
+- Install/update permission reconciliation that drops grants no longer declared by manifest.
 
 ## Running
 
@@ -64,14 +71,23 @@ cargo run -p dark-forest -- --registry-add file:///path/to/index.json
 cargo run -p dark-forest -- --registry-remove file:///path/to/index.json
 ```
 
-## Release Artifacts (v0.1.0)
+Permissions audit/revoke:
+
+```bash
+cargo run -p dark-forest -- --permissions-list
+cargo run -p dark-forest -- --permissions-list remote-wasm
+cargo run -p dark-forest -- --permissions-revoke remote-wasm
+cargo run -p dark-forest -- --permissions-revoke remote-wasm --capability net
+```
+
+## Release Artifacts (v1.0.0)
 
 Tag-driven release builds publish:
 
-- `dark-forest-v0.1.0-linux-x86_64.tar.gz`
-- `dark-forest-v0.1.0-linux-aarch64.tar.gz`
-- `dark-forest-v0.1.0-macos-arm64.tar.gz`
-- `dark-forest-v0.1.0-windows-x86_64.zip`
+- `dark-forest-v1.0.0-linux-x86_64.tar.gz`
+- `dark-forest-v1.0.0-linux-aarch64.tar.gz`
+- `dark-forest-v1.0.0-macos-arm64.tar.gz`
+- `dark-forest-v1.0.0-windows-x86_64.zip`
 - `SHA256SUMS.txt`
 
 ## Architecture At A Glance
@@ -81,7 +97,7 @@ Tag-driven release builds publish:
 - `crates/games`: built-in native games.
 - `crates/content`: JSON persistence, install transactions, rollback/verify, and permissions grant storage.
 - `crates/registry`: builtin and `index://` providers, manifest normalization, artifact fetch/unpack helpers.
-- `crates/plugin-host`: entry types and capability model contracts used by manifest normalization.
+- `crates/plugin-host`: entry type policy, Wasmtime runtime adapter, capability mediation, and prompt request contracts.
 - `crates/theme`: Forge theme tokens and style helpers.
 - `crates/diagnostics`: terminal and render diagnostics.
 

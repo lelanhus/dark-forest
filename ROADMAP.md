@@ -18,8 +18,9 @@ Source of product scope: `SPEC.md`.
 - M2 Runtime v0: Complete
 - M3 Built-in Native Games (`v0.1.0`): Complete
 - M4 Local Installs + Hot-load (`v0.2`): Complete
-- M5 First Remote Provider (`v0.3`): In Progress
-- M6+ : Pending
+- M5 First Remote Provider (`v0.3`): Complete
+- M6 Permission Enforcement and WASM Plugins (`v1.0`): Complete
+- M7+ : Pending
 
 ## M0 - Foundation (Complete)
 
@@ -85,36 +86,52 @@ Dependencies:
 
 - M2, M3.
 
-## M5 - First Remote Registry Provider (v0.3, In Progress)
+## M5 - First Remote Registry Provider (v0.3, Complete)
 
 Objective: remote source ingestion with cache/recovery behavior.
 
-Planned exit criteria:
+Exit criteria met:
 
 - At least one remote provider (`index://` preferred) implemented.
 - Catalog/artifact caching and retry/recovery behavior documented and tested.
 - Registry errors surfaced without UI lockup.
 
-Current implementation slice:
+Delivered:
 
 - `index://` provider implemented with list/resolve behavior.
-- Remote index cache fallback on fetch failure.
+- Remote index fetch supports `file://` and `http(s)://` locators.
+- HTTP index fetch uses bounded retries and deterministic cache fallback on fetch failure.
 - Artifact download + checksum verification + tarball unpack wiring.
+- Registry source settings (`--registry-list`, `--registry-add`, `--registry-remove`).
+- Marketplace catalog refresh is asynchronous and non-blocking in interactive mode.
 
 Dependencies:
 
 - M4.
 
-## M6 - Permission Enforcement and WASM Plugins (v1.0, Pending)
+## M6 - Permission Enforcement and WASM Plugins (v1.0, Complete)
 
 Objective: enforce trust boundaries for third-party games.
 
-Planned exit criteria:
+Exit criteria met:
 
 - WASM third-party plugin execution supported.
 - Capability grants enforced and revocable.
 - Permission prompts and audit UI operational.
 - At least one remote provider stable under policy gates.
+
+Delivered:
+
+- Wasmtime-backed `WasmGameAdapter` and manifest-driven launch resolver.
+- Third-party `entry_type=native|process` remain blocked by policy in `v1.0`.
+- Host boundary capability evaluation for WASM guest requests.
+- First-use permission prompt overlay with session/persisted decisions.
+- Settings route permission audit/revoke UX and CLI parity:
+  - `--permissions-list [<game_id>]`
+  - `--permissions-revoke <game_id> [--capability <cap>]`
+- Install/update permission reconciliation:
+  - removes grants for no-longer-declared capabilities/scopes
+  - preserves still-compatible grants
 
 Dependencies:
 

@@ -15,14 +15,14 @@ Dark Forest releases from `main` using SemVer tags and a tag-driven GitHub Actio
 - Backward-compatible features increment minor version.
 - Fixes increment patch version.
 
-## Artifact Contract (`v0.1.0`)
+## Artifact Contract (`v1.0.0`)
 
-Tag `v0.1.0` must publish:
+Tag `v1.0.0` must publish:
 
-- `dark-forest-v0.1.0-linux-x86_64.tar.gz`
-- `dark-forest-v0.1.0-linux-aarch64.tar.gz`
-- `dark-forest-v0.1.0-macos-arm64.tar.gz`
-- `dark-forest-v0.1.0-windows-x86_64.zip`
+- `dark-forest-v1.0.0-linux-x86_64.tar.gz`
+- `dark-forest-v1.0.0-linux-aarch64.tar.gz`
+- `dark-forest-v1.0.0-macos-arm64.tar.gz`
+- `dark-forest-v1.0.0-windows-x86_64.zip`
 - `SHA256SUMS.txt`
 
 Each packaged artifact includes:
@@ -62,8 +62,8 @@ Publication step runs only for tag refs.
 3. Create and push annotated tag:
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
 ```
 
 1. Monitor `release` workflow run.

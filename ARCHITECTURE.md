@@ -34,7 +34,9 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Tarball artifact fetch + unpack helpers
 - `crates/plugin-host`
   - Execution type dispatch (`native|wasm|process`)
+  - Wasmtime adapter for `entry_type=wasm`
   - Capability mediation and grant checks
+  - Permission prompt request contracts for app/shell integration
   - Sandbox integration boundary
 
 ## Trust Boundaries
@@ -47,6 +49,7 @@ Policy gates:
 
 - Third-party `entry_type=native` is rejected unless trust policy explicitly whitelists source.
 - Capability checks are performed at host boundary, never delegated to plugin self-declaration.
+- Third-party `entry_type=process` remains disabled by default policy.
 
 ## Async and Concurrency Model
 
@@ -58,6 +61,9 @@ Policy gates:
 - Hot-load refresh uses polling (1s cadence) over installed-state and manifest files.
 - Marketplace catalog refresh runs in a background task (30s cadence) and posts non-blocking
   catalog/error events into the UI loop.
+- Permission prompt requests are queued from the capability enforcement boundary and surfaced as shell overlays
+  without blocking the shell event loop.
+- Runner execution pauses only while a permission prompt is active and resumes immediately after decision capture.
 
 ## Failure Boundaries
 
@@ -66,6 +72,7 @@ Policy gates:
 - Content transaction failure path must preserve previous `current` pointer and quarantine partial staging.
 - Registry/provider failures must degrade gracefully and keep local functionality available.
 - Plugin failures are isolated from host process when possible.
+- Capability denials return structured plugin errors and must not crash the host process.
 
 ## Data and Interface Contracts
 

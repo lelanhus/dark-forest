@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "content"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "dark-forest"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "diagnostics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crossterm",
  "serde",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "games"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1403,7 +1403,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "plugin-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1663,7 +1663,7 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "registry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1719,7 +1719,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "shell"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crossterm",
  "pretty_assertions",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "theme"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ratatui",
 ]
