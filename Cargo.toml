@@ -9,6 +9,7 @@ members = [
   "crates/games",
   "crates/theme",
   "crates/diagnostics",
+  "crates/creator",
 ]
 resolver = "2"
 

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
+use creator::{PackRequest, VerifyRequest, pack_game, verify_artifact};
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -50,6 +51,7 @@ enum LaunchMode {
     Operation(ContentOperation),
     Registry(RegistryCommand),
     Permissions(PermissionsCommand),
+    Creator(CreatorCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,19 @@ enum PermissionsCommand {
     Revoke {
         game_id: String,
         capability: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CreatorCommand {
+    Pack {
+        game_dir: PathBuf,
+        out: Option<PathBuf>,
+        metadata_out: Option<PathBuf>,
+    },
+    VerifyArtifact {
+        artifact_path: PathBuf,
+        metadata_path: Option<PathBuf>,
     },
 }
 
@@ -120,6 +135,15 @@ impl ContentOperation {
     }
 }
 
+impl CreatorCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Pack { .. } => "pack",
+            Self::VerifyArtifact { .. } => "verify-artifact",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OperationReport {
     operation: String,
@@ -148,6 +172,53 @@ impl OperationReport {
     }
 }
 
+impl CreatorCommandReport {
+    fn success_pack(outcome: creator::PackOutcome) -> Self {
+        Self {
+            command: "pack".to_string(),
+            success: true,
+            message: format!(
+                "packed {}@{}",
+                outcome.metadata.game_id, outcome.metadata.version
+            ),
+            artifact_path: Some(outcome.artifact_path),
+            metadata_path: Some(outcome.metadata_path),
+            game_id: Some(outcome.metadata.game_id),
+            version: Some(outcome.metadata.version),
+            artifact_sha256: Some(outcome.metadata.artifact_sha256),
+            artifact_size_bytes: Some(outcome.metadata.artifact_size_bytes),
+        }
+    }
+
+    fn success_verify(outcome: creator::VerifyOutcome) -> Self {
+        Self {
+            command: "verify-artifact".to_string(),
+            success: true,
+            message: format!("verified {}@{}", outcome.game_id, outcome.version),
+            artifact_path: Some(outcome.artifact_path),
+            metadata_path: Some(outcome.metadata_path),
+            game_id: Some(outcome.game_id),
+            version: Some(outcome.version),
+            artifact_sha256: Some(outcome.artifact_sha256),
+            artifact_size_bytes: Some(outcome.artifact_size_bytes),
+        }
+    }
+
+    fn failure(command: &CreatorCommand, message: String) -> Self {
+        Self {
+            command: command.label().to_string(),
+            success: false,
+            message,
+            artifact_path: None,
+            metadata_path: None,
+            game_id: None,
+            version: None,
+            artifact_sha256: None,
+            artifact_size_bytes: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RegistryCommandReport {
     command: String,
@@ -162,6 +233,19 @@ struct PermissionsCommandReport {
     success: bool,
     message: String,
     grants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CreatorCommandReport {
+    command: String,
+    success: bool,
+    message: String,
+    artifact_path: Option<PathBuf>,
+    metadata_path: Option<PathBuf>,
+    game_id: Option<String>,
+    version: Option<String>,
+    artifact_sha256: Option<String>,
+    artifact_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -319,6 +403,12 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --registry-remove <locator>");
             println!("  dark-forest --permissions-list [<game_id>]");
             println!("  dark-forest --permissions-revoke <game_id> [--capability <cap>]");
+            println!(
+                "  dark-forest --pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]"
+            );
+            println!(
+                "  dark-forest --verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]"
+            );
             std::process::exit(0);
         }
         "--replay" => {
@@ -483,6 +573,73 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 capability,
             }))
         }
+        "--pack" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--pack requires <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]"
+                ));
+            }
+
+            let mut out = None;
+            let mut metadata_out = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--out" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--out requires a value"));
+                        }
+                        out = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--metadata-out" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--metadata-out requires a value"));
+                        }
+                        metadata_out = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --pack: {other}"));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Creator(CreatorCommand::Pack {
+                game_dir: PathBuf::from(&args[1]),
+                out,
+                metadata_out,
+            }))
+        }
+        "--verify-artifact" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--verify-artifact requires <artifact.tar.gz> [--metadata <metadata.json>]"
+                ));
+            }
+
+            let mut metadata_path = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--metadata" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--metadata requires a value"));
+                        }
+                        metadata_path = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --verify-artifact: {other}"));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Creator(CreatorCommand::VerifyArtifact {
+                artifact_path: PathBuf::from(&args[1]),
+                metadata_path,
+            }))
+        }
         other => Err(anyhow!("unknown argument: {other}")),
     }
 }
@@ -510,6 +667,66 @@ fn run_operation_cli(operation: ContentOperation) -> Result<()> {
     println!("operation={}", report.operation);
     println!("success={}", report.success);
     println!("message={}", report.message);
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
+fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandReport> {
+    match command {
+        CreatorCommand::Pack {
+            game_dir,
+            out,
+            metadata_out,
+        } => {
+            let outcome = pack_game(&PackRequest {
+                game_dir,
+                out,
+                metadata_out,
+            })?;
+            Ok(CreatorCommandReport::success_pack(outcome))
+        }
+        CreatorCommand::VerifyArtifact {
+            artifact_path,
+            metadata_path,
+        } => {
+            let outcome = verify_artifact(&VerifyRequest {
+                artifact_path,
+                metadata_path,
+            })?;
+            Ok(CreatorCommandReport::success_verify(outcome))
+        }
+    }
+}
+
+fn run_creator_cli(command: CreatorCommand) -> Result<()> {
+    let report = execute_creator_command(command.clone())
+        .unwrap_or_else(|err| CreatorCommandReport::failure(&command, err.to_string()));
+
+    println!("command={}", report.command);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+    if let Some(path) = &report.artifact_path {
+        println!("artifact.path={}", path.display());
+    }
+    if let Some(path) = &report.metadata_path {
+        println!("metadata.path={}", path.display());
+    }
+    if let Some(game_id) = &report.game_id {
+        println!("game.id={game_id}");
+    }
+    if let Some(version) = &report.version {
+        println!("game.version={version}");
+    }
+    if let Some(checksum) = &report.artifact_sha256 {
+        println!("artifact.sha256={checksum}");
+    }
+    if let Some(size) = report.artifact_size_bytes {
+        println!("artifact.size_bytes={size}");
+    }
 
     if report.success {
         Ok(())
@@ -1786,6 +2003,7 @@ async fn main() -> Result<()> {
         LaunchMode::Operation(operation) => run_operation_cli(operation),
         LaunchMode::Registry(command) => run_registry_cli(command),
         LaunchMode::Permissions(command) => run_permissions_cli(command),
+        LaunchMode::Creator(command) => run_creator_cli(command),
     }
 }
 
@@ -2150,10 +2368,11 @@ mod tests {
     use shell::{Overlay, Route, ShellCommand};
 
     use super::{
-        AppCapabilityEnforcer, ContentOperation, LaunchMode, PermissionsCommand, RegistryCommand,
-        compute_hotload_signature, create_game_instance, execute_content_operation,
-        execute_permissions_command, execute_registry_command, load_marketplace_catalog,
-        parse_launch_mode, should_forward_key_to_runner, should_render_frame,
+        AppCapabilityEnforcer, ContentOperation, CreatorCommand, LaunchMode, PermissionsCommand,
+        RegistryCommand, compute_hotload_signature, create_game_instance,
+        execute_content_operation, execute_permissions_command, execute_registry_command,
+        load_marketplace_catalog, parse_launch_mode, should_forward_key_to_runner,
+        should_render_frame,
     };
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
@@ -2343,6 +2562,79 @@ mod tests {
                 version: Some("0.2.0".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn parses_pack_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--pack".to_string(),
+            "/tmp/game".to_string(),
+            "--out".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--metadata-out".to_string(),
+            "/tmp/out/sample-game-1.2.3.metadata.json".to_string(),
+        ])
+        .expect("pack mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Pack {
+                game_dir: PathBuf::from("/tmp/game"),
+                out: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz")),
+                metadata_out: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.metadata.json")),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_verify_artifact_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--verify-artifact".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--metadata".to_string(),
+            "/tmp/out/sample-game-1.2.3.metadata.json".to_string(),
+        ])
+        .expect("verify-artifact mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::VerifyArtifact {
+                artifact_path: PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz"),
+                metadata_path: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.metadata.json")),
+            })
+        );
+    }
+
+    #[test]
+    fn pack_launch_mode_requires_game_dir() {
+        let err = parse_launch_mode(vec!["--pack".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn pack_launch_mode_rejects_unknown_argument() {
+        let err = parse_launch_mode(vec![
+            "--pack".to_string(),
+            "/tmp/game".to_string(),
+            "--unknown".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn verify_artifact_launch_mode_requires_artifact_path() {
+        let err = parse_launch_mode(vec!["--verify-artifact".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn verify_artifact_launch_mode_rejects_unknown_argument() {
+        let err = parse_launch_mode(vec![
+            "--verify-artifact".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--nope".to_string(),
+        ]);
+        assert!(err.is_err());
     }
 
     #[test]

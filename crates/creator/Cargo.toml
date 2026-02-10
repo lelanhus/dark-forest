@@ -1,0 +1,21 @@
+[package]
+name = "creator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+registry = { path = "../registry" }
+sha2 = "0.10"
+flate2 = "1.1"
+tar = "0.4"
+tempfile = "3.17"
+
+[lints]
+workspace = true

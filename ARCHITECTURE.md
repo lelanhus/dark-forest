@@ -32,6 +32,10 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Listing/resolve flows
   - Provider adapters (`builtin://`, `index://`)
   - Tarball artifact fetch + unpack helpers
+- `crates/creator`
+  - Creator-facing deterministic artifact packaging (`pack`)
+  - Artifact metadata generation and serialization
+  - Artifact verification against metadata + embedded manifest
 - `crates/plugin-host`
   - Execution type dispatch (`native|wasm|process`)
   - Wasmtime adapter for `entry_type=wasm`

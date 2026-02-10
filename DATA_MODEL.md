@@ -200,6 +200,29 @@ Validation rules:
 - Third-party native entry declarations must be rejected by policy unless explicitly trusted source rules allow them.
 - `permissions` accepts legacy string labels and typed capability objects; host normalizes into typed grants.
 
+## Creator Artifact Metadata (`*.metadata.json`)
+
+Purpose: sidecar contract emitted by creator tooling for packaged artifacts.
+
+Fields:
+
+- `schema_version: u32`
+- `game_id: String`
+- `version: SemVer`
+- `entry_type: EntryType`
+- `host_api: SemVerRange`
+- `artifact_file: String` (artifact filename, not absolute path)
+- `artifact_sha256: Sha256Hex`
+- `artifact_size_bytes: u64`
+- `generated_at: Timestamp`
+
+Invariants:
+
+- `schema_version` must match the creator metadata parser contract.
+- `artifact_file` must match the verified artifact filename.
+- `artifact_sha256` and `artifact_size_bytes` must match artifact bytes exactly.
+- `game_id`, `version`, `entry_type`, and `host_api` must match unpacked `game.json`.
+
 ## Integrity and Atomicity Requirements
 
 - Install state writes must be crash-safe.
