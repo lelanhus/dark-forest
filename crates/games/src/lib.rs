@@ -4,7 +4,7 @@ mod tetris_like;
 
 use anyhow::Result;
 use plugin_host::EntryType;
-use registry::{GameListing, SourceRef};
+use registry::{CompatibilityBadge, GameListing, SourceRef};
 use runtime::Game;
 
 pub const SNAKE_ID: &str = "snake-plus";
@@ -24,6 +24,13 @@ pub fn builtin_catalog() -> Vec<GameListing> {
             permissions_summary: vec!["terminal.raw_input".to_string()],
             host_api_range: "^0.1".to_string(),
             entry_type: EntryType::Native,
+            verified: true,
+            publisher_id: Some("dark-forest".to_string()),
+            collections: vec!["Featured".to_string(), "Best on Pi".to_string()],
+            compatibility: Some(CompatibilityBadge {
+                host_api: "compatible".to_string(),
+                permissions: "low-risk".to_string(),
+            }),
         },
         GameListing {
             id: TETRIS_ID.to_string(),
@@ -39,6 +46,13 @@ pub fn builtin_catalog() -> Vec<GameListing> {
             permissions_summary: vec!["terminal.raw_input".to_string()],
             host_api_range: "^0.1".to_string(),
             entry_type: EntryType::Native,
+            verified: true,
+            publisher_id: Some("dark-forest".to_string()),
+            collections: vec!["Featured".to_string(), "Arcade".to_string()],
+            compatibility: Some(CompatibilityBadge {
+                host_api: "compatible".to_string(),
+                permissions: "low-risk".to_string(),
+            }),
         },
         GameListing {
             id: ROGUELITE_ID.to_string(),
@@ -54,6 +68,13 @@ pub fn builtin_catalog() -> Vec<GameListing> {
             permissions_summary: vec!["terminal.raw_input".to_string()],
             host_api_range: "^0.1".to_string(),
             entry_type: EntryType::Native,
+            verified: true,
+            publisher_id: Some("dark-forest".to_string()),
+            collections: vec!["Featured".to_string(), "Roguelike".to_string()],
+            compatibility: Some(CompatibilityBadge {
+                host_api: "compatible".to_string(),
+                permissions: "low-risk".to_string(),
+            }),
         },
     ]
 }

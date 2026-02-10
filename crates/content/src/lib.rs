@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 fn default_registry_scheme() -> String {
     "index".to_string()
@@ -20,6 +20,61 @@ fn default_registry_scheme() -> String {
 
 fn default_prompt_sensitive_only() -> bool {
     true
+}
+
+fn default_keymap_profile() -> String {
+    "default".to_string()
+}
+
+fn default_allow_process_plugins() -> bool {
+    false
+}
+
+fn default_allow_error_clipboard_copy() -> bool {
+    false
+}
+
+fn default_key_bindings() -> BTreeMap<String, String> {
+    [
+        ("quit", "Ctrl+Q"),
+        ("palette", "Ctrl+K"),
+        ("search", "/"),
+        ("help", "?"),
+        ("up", "Up"),
+        ("down", "Down"),
+        ("select", "Enter"),
+        ("back", "Esc"),
+        ("library.install", "I"),
+        ("installed.update", "U"),
+        ("installed.rollback", "B"),
+        ("installed.verify", "V"),
+        ("installed.remove", "X"),
+        ("detail.install", "I"),
+        ("detail.remove", "X"),
+        ("filters.open", "G"),
+        ("runner.pause", "P"),
+        ("runner.restart", "R"),
+        ("runner.fullscreen", "F"),
+        ("runner.exit", "Esc"),
+        ("hot_reload.reload_now", "R"),
+        ("hot_reload.reload_later", "L"),
+        ("error.copy", "C"),
+    ]
+    .into_iter()
+    .map(|(action, key)| (action.to_string(), key.to_string()))
+    .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RegistryFilters {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub verified_only: bool,
+    #[serde(default)]
+    pub collection: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,11 +103,18 @@ pub struct Settings {
     pub schema_version: u32,
     pub theme: String,
     pub performance_mode: String,
-    pub keymap_profile: String,
+    #[serde(default = "default_keymap_profile", alias = "keymap_profile")]
+    pub keymap_active_profile: String,
+    #[serde(default)]
+    pub registry_filters: RegistryFilters,
     #[serde(default)]
     pub registries: Vec<RegistryConfig>,
     #[serde(default)]
     pub security_toggles: SecurityToggles,
+    #[serde(default = "default_allow_process_plugins")]
+    pub allow_process_plugins: bool,
+    #[serde(default = "default_allow_error_clipboard_copy")]
+    pub allow_error_clipboard_copy: bool,
 }
 
 impl Default for Settings {
@@ -61,9 +123,12 @@ impl Default for Settings {
             schema_version: CURRENT_SCHEMA_VERSION,
             theme: "forge".to_string(),
             performance_mode: "auto".to_string(),
-            keymap_profile: "default".to_string(),
+            keymap_active_profile: default_keymap_profile(),
+            registry_filters: RegistryFilters::default(),
             registries: Vec::new(),
             security_toggles: SecurityToggles::default(),
+            allow_process_plugins: default_allow_process_plugins(),
+            allow_error_clipboard_copy: default_allow_error_clipboard_copy(),
         }
     }
 }
@@ -151,6 +216,16 @@ pub struct InstalledRecord {
     pub installed_versions: Vec<String>,
     #[serde(default)]
     pub version_checksums: BTreeMap<String, String>,
+    #[serde(default)]
+    pub artifact_uri: Option<String>,
+    #[serde(default)]
+    pub checksum_sha256: Option<String>,
+    #[serde(default)]
+    pub publisher_id: Option<String>,
+    #[serde(default)]
+    pub signature_fingerprint: Option<String>,
+    #[serde(default)]
+    pub verified_at: Option<DateTime<Utc>>,
 }
 
 impl InstalledRecord {
@@ -201,6 +276,57 @@ pub struct PermissionGrant {
     pub granted_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublisherKeyRecord {
+    pub publisher_id: String,
+    pub public_key_base64: String,
+    pub fingerprint_sha256: String,
+    pub added_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PublisherKeyringFile {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub keys: BTreeMap<String, PublisherKeyRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct KeymapProfile {
+    #[serde(default)]
+    pub bindings: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeymapProfilesFile {
+    pub schema_version: u32,
+    #[serde(default = "default_keymap_profile")]
+    pub active_profile: String,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, KeymapProfile>,
+    #[serde(default)]
+    pub game_overrides: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Default for KeymapProfilesFile {
+    fn default() -> Self {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            default_keymap_profile(),
+            KeymapProfile {
+                bindings: default_key_bindings(),
+            },
+        );
+
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            active_profile: default_keymap_profile(),
+            profiles,
+            game_overrides: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     pub game_id: String,
@@ -208,6 +334,10 @@ pub struct InstallRequest {
     pub source: String,
     pub artifact_dir: PathBuf,
     pub expected_sha256: Option<String>,
+    pub artifact_uri: Option<String>,
+    pub publisher_id: Option<String>,
+    pub signature_fingerprint: Option<String>,
+    pub verified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +405,10 @@ pub trait ContentStore {
     fn save_installed(&self, installed: &InstalledFile) -> Result<()>;
     fn load_permissions(&self) -> Result<PermissionsFile>;
     fn save_permissions(&self, permissions: &PermissionsFile) -> Result<()>;
+    fn load_publisher_keyring(&self) -> Result<PublisherKeyringFile>;
+    fn save_publisher_keyring(&self, keyring: &PublisherKeyringFile) -> Result<()>;
+    fn load_keymap_profiles(&self) -> Result<KeymapProfilesFile>;
+    fn save_keymap_profiles(&self, profiles: &KeymapProfilesFile) -> Result<()>;
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores>;
     fn save_high_scores(&self, game_id: &str, scores: &HighScores) -> Result<()>;
 }
@@ -310,6 +444,9 @@ impl JsonContentStore {
 
     pub fn ensure_layout(&self) -> Result<()> {
         fs::create_dir_all(&self.root)?;
+        if let Some(version) = self.detect_mismatched_schema_version()? {
+            self.backup_root_for_schema(version)?;
+        }
         fs::create_dir_all(self.high_scores_dir())?;
         fs::create_dir_all(self.quarantine_dir())?;
         fs::create_dir_all(self.games_dir())?;
@@ -393,6 +530,11 @@ impl JsonContentStore {
         record
             .version_checksums
             .insert(request.version.clone(), checksum.clone());
+        record.artifact_uri = request.artifact_uri.clone();
+        record.checksum_sha256 = Some(checksum.clone());
+        record.publisher_id = request.publisher_id.clone();
+        record.signature_fingerprint = request.signature_fingerprint.clone();
+        record.verified_at = request.verified_at;
 
         self.write_current_pointer(&request.game_id, &request.version)
             .map_err(ContentTransactionError::Other)?;
@@ -500,7 +642,8 @@ impl JsonContentStore {
         let expected_sha256 = record
             .version_checksums
             .get(&record.current_version)
-            .cloned();
+            .cloned()
+            .or_else(|| record.checksum_sha256.clone());
 
         let verified = expected_sha256
             .as_ref()
@@ -637,6 +780,82 @@ impl JsonContentStore {
         self.root.join("permissions.json")
     }
 
+    fn publisher_keyring_path(&self) -> PathBuf {
+        self.root.join("publisher_keys.json")
+    }
+
+    fn keymap_profiles_path(&self) -> PathBuf {
+        self.root.join("keymap_profiles.json")
+    }
+
+    fn schema_version_files(&self) -> [PathBuf; 6] {
+        [
+            self.settings_path(),
+            self.play_history_path(),
+            self.installed_path(),
+            self.permissions_path(),
+            self.publisher_keyring_path(),
+            self.keymap_profiles_path(),
+        ]
+    }
+
+    fn detect_mismatched_schema_version(&self) -> Result<Option<u32>> {
+        for path in self.schema_version_files() {
+            if !path.exists() {
+                continue;
+            }
+            let Some(version) = read_schema_version(&path)? else {
+                continue;
+            };
+            if version != CURRENT_SCHEMA_VERSION {
+                return Ok(Some(version));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn backup_root_for_schema(&self, schema_version: u32) -> Result<()> {
+        let parent = self
+            .root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let root_name = self
+            .root
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("dark-forest");
+        let timestamp = Utc::now().format("%Y%m%d%H%M%S");
+        let mut backup = parent.join(format!(
+            "{root_name}.schema-v{schema_version}-backup-{timestamp}"
+        ));
+        let mut suffix = 0usize;
+        while backup.exists() {
+            suffix = suffix.saturating_add(1);
+            backup = parent.join(format!(
+                "{root_name}.schema-v{schema_version}-backup-{timestamp}-{suffix}"
+            ));
+        }
+
+        fs::rename(&self.root, &backup).with_context(|| {
+            format!(
+                "failed to backup legacy schema root {} to {}",
+                self.root.display(),
+                backup.display()
+            )
+        })?;
+        fs::create_dir_all(&self.root)?;
+        tracing::warn!(
+            root = %self.root.display(),
+            backup = %backup.display(),
+            schema_version,
+            current = CURRENT_SCHEMA_VERSION,
+            "detected legacy schema; backed up and reinitialized content root"
+        );
+        Ok(())
+    }
+
     fn ensure_seed_files(&self) -> Result<()> {
         if !self.settings_path().exists() {
             self.atomic_write_json(&self.settings_path(), &Settings::default())?;
@@ -664,6 +883,20 @@ impl JsonContentStore {
                     grants: BTreeMap::new(),
                 },
             )?;
+        }
+
+        if !self.publisher_keyring_path().exists() {
+            self.atomic_write_json(
+                &self.publisher_keyring_path(),
+                &PublisherKeyringFile {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    keys: BTreeMap::new(),
+                },
+            )?;
+        }
+
+        if !self.keymap_profiles_path().exists() {
+            self.atomic_write_json(&self.keymap_profiles_path(), &KeymapProfilesFile::default())?;
         }
 
         Ok(())
@@ -814,6 +1047,31 @@ impl ContentStore for JsonContentStore {
         self.atomic_write_json(&self.permissions_path(), permissions)
     }
 
+    fn load_publisher_keyring(&self) -> Result<PublisherKeyringFile> {
+        self.ensure_layout()?;
+        let path = self.publisher_keyring_path();
+        let loaded = self.read_json_or_quarantine::<PublisherKeyringFile>(&path)?;
+        Ok(loaded.unwrap_or(PublisherKeyringFile {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            keys: BTreeMap::new(),
+        }))
+    }
+
+    fn save_publisher_keyring(&self, keyring: &PublisherKeyringFile) -> Result<()> {
+        self.atomic_write_json(&self.publisher_keyring_path(), keyring)
+    }
+
+    fn load_keymap_profiles(&self) -> Result<KeymapProfilesFile> {
+        self.ensure_layout()?;
+        let path = self.keymap_profiles_path();
+        let loaded = self.read_json_or_quarantine::<KeymapProfilesFile>(&path)?;
+        Ok(loaded.unwrap_or_default())
+    }
+
+    fn save_keymap_profiles(&self, profiles: &KeymapProfilesFile) -> Result<()> {
+        self.atomic_write_json(&self.keymap_profiles_path(), profiles)
+    }
+
     fn load_high_scores(&self, game_id: &str) -> Result<HighScores> {
         self.ensure_layout()?;
         let path = self.high_score_path(game_id);
@@ -847,6 +1105,11 @@ fn upsert_installed_record<'a>(
         current_version: String::new(),
         installed_versions: Vec::new(),
         version_checksums: BTreeMap::new(),
+        artifact_uri: None,
+        checksum_sha256: None,
+        publisher_id: None,
+        signature_fingerprint: None,
+        verified_at: None,
     });
 
     installed.installed.last_mut().expect("record was inserted")
@@ -1052,6 +1315,23 @@ fn to_hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+fn read_schema_version(path: &Path) -> Result<Option<u32>> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let Some(version) = value
+        .as_object()
+        .and_then(|map| map.get("schema_version"))
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(version as u32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1070,6 +1350,11 @@ mod tests {
         let mut settings = store.load_settings()?;
         settings.performance_mode = "60".to_string();
         settings.security_toggles.prompt_sensitive_only = false;
+        settings.allow_process_plugins = true;
+        settings.allow_error_clipboard_copy = true;
+        settings.registry_filters.verified_only = true;
+        settings.registry_filters.tags = vec!["arcade".to_string()];
+        settings.keymap_active_profile = "vim".to_string();
         settings.registries = vec![super::RegistryConfig {
             scheme: "index".to_string(),
             locator: "file:///tmp/index.json".to_string(),
@@ -1080,54 +1365,58 @@ mod tests {
         assert_eq!(reloaded.performance_mode, "60");
         assert_eq!(reloaded.registries, settings.registries);
         assert!(!reloaded.security_toggles.prompt_sensitive_only);
+        assert!(reloaded.allow_process_plugins);
+        assert!(reloaded.allow_error_clipboard_copy);
+        assert!(reloaded.registry_filters.verified_only);
+        assert_eq!(reloaded.registry_filters.tags, vec!["arcade".to_string()]);
+        assert_eq!(reloaded.keymap_active_profile, "vim");
         Ok(())
     }
 
     #[test]
-    fn loads_legacy_settings_without_registries() -> Result<()> {
+    fn legacy_schema_root_is_backed_up_and_reinitialized() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let root = PathBuf::from(temp.path());
+        let root = temp.path().join("dark-forest");
         let store = JsonContentStore::new(root.clone());
-        store.ensure_layout()?;
+        std::fs::create_dir_all(&root)?;
 
         std::fs::write(
             root.join("settings.json"),
             r#"{
                 "schema_version": 2,
-                "theme": "forge",
-                "performance_mode": "auto",
-                "keymap_profile": "default"
-            }"#,
-        )?;
-
-        let settings = store.load_settings()?;
-        assert!(settings.registries.is_empty());
-        assert!(settings.security_toggles.prompt_sensitive_only);
-        Ok(())
-    }
-
-    #[test]
-    fn loads_legacy_settings_without_security_toggles() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let root = PathBuf::from(temp.path());
-        let store = JsonContentStore::new(root.clone());
-        store.ensure_layout()?;
-
-        std::fs::write(
-            root.join("settings.json"),
-            r#"{
-                "schema_version": 2,
-                "theme": "forge",
+                "theme": "legacy-theme",
                 "performance_mode": "30",
-                "keymap_profile": "default",
                 "registries": [{"scheme":"index","locator":"file:///tmp/index.json"}]
             }"#,
         )?;
+        std::fs::write(
+            root.join("installed.json"),
+            r#"{
+                "schema_version": 2,
+                "installed": [{
+                    "id": "legacy-game",
+                    "source": "index://legacy",
+                    "current_version": "0.1.0"
+                }]
+            }"#,
+        )?;
+
+        store.ensure_layout()?;
 
         let settings = store.load_settings()?;
-        assert_eq!(settings.performance_mode, "30");
-        assert_eq!(settings.registries.len(), 1);
-        assert!(settings.security_toggles.prompt_sensitive_only);
+        assert_eq!(settings.schema_version, super::CURRENT_SCHEMA_VERSION);
+        assert_eq!(settings.theme, "forge");
+        assert!(settings.registries.is_empty());
+
+        let installed = store.load_installed()?;
+        assert_eq!(installed.schema_version, super::CURRENT_SCHEMA_VERSION);
+        assert!(installed.installed.is_empty());
+
+        let backup = find_backup_dir(temp.path(), "dark-forest.schema-v2-backup-")?;
+        let backup_settings = std::fs::read_to_string(backup.join("settings.json"))?;
+        assert!(backup_settings.contains("\"legacy-theme\""));
+        let backup_installed = std::fs::read_to_string(backup.join("installed.json"))?;
+        assert!(backup_installed.contains("\"legacy-game\""));
         Ok(())
     }
 
@@ -1182,6 +1471,11 @@ mod tests {
             current_version: "0.1.0".to_string(),
             installed_versions: vec!["0.1.0".to_string()],
             version_checksums: BTreeMap::new(),
+            artifact_uri: None,
+            checksum_sha256: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         });
         store.save_installed(&installed)?;
 
@@ -1205,6 +1499,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: artifact,
                 expected_sha256: None,
+                artifact_uri: Some("file:///tmp/artifact.tar.gz".to_string()),
+                publisher_id: Some("local-dev".to_string()),
+                signature_fingerprint: Some("dev-fingerprint".to_string()),
+                verified_at: Some(chrono::Utc::now()),
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1222,6 +1520,15 @@ mod tests {
             .ok_or_else(|| anyhow!("missing installed record"))?;
         assert_eq!(record.current_version, "0.2.0");
         assert!(record.installed_versions.iter().any(|item| item == "0.2.0"));
+        assert_eq!(
+            record.artifact_uri.as_deref(),
+            Some("file:///tmp/artifact.tar.gz")
+        );
+        assert_eq!(record.publisher_id.as_deref(), Some("local-dev"));
+        assert_eq!(
+            record.signature_fingerprint.as_deref(),
+            Some("dev-fingerprint")
+        );
         Ok(())
     }
 
@@ -1239,6 +1546,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: first,
                 expected_sha256: None,
+                artifact_uri: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1249,6 +1560,10 @@ mod tests {
             source: "local://fixtures".to_string(),
             artifact_dir: second,
             expected_sha256: Some("deadbeef".to_string()),
+            artifact_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         });
         assert!(result.is_err());
 
@@ -1275,6 +1590,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: v1,
                 expected_sha256: None,
+                artifact_uri: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1285,6 +1604,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: v2,
                 expected_sha256: None,
+                artifact_uri: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1315,6 +1638,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: artifact,
                 expected_sha256: None,
+                artifact_uri: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1344,6 +1671,10 @@ mod tests {
                 source: "local://fixtures".to_string(),
                 artifact_dir: artifact,
                 expected_sha256: None,
+                artifact_uri: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             })
             .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1395,6 +1726,11 @@ mod tests {
             current_version: "0.1.0".to_string(),
             installed_versions: vec!["0.1.0".to_string()],
             version_checksums: BTreeMap::new(),
+            artifact_uri: None,
+            checksum_sha256: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         });
         store.save_installed(&installed)?;
 
@@ -1407,14 +1743,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_installed_record_is_upgraded_in_memory() -> Result<()> {
+    fn legacy_schema_detection_is_triggered_by_installed_file() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let root = PathBuf::from(temp.path());
+        let root = temp.path().join("content-root");
         let store = JsonContentStore::new(root.clone());
-        store.ensure_layout()?;
+        std::fs::create_dir_all(&root)?;
 
         let legacy = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "installed": [
                 {
                     "id": "snake-plus",
@@ -1428,14 +1764,12 @@ mod tests {
             serde_json::to_vec_pretty(&legacy)?,
         )?;
 
-        let installed = store.load_installed()?;
-        let record = installed
-            .installed
-            .iter()
-            .find(|item| item.id == "snake-plus")
-            .ok_or_else(|| anyhow!("missing migrated record"))?;
+        store.ensure_layout()?;
 
-        assert!(record.installed_versions.iter().any(|item| item == "0.1.0"));
+        let installed = store.load_installed()?;
+        assert!(installed.installed.is_empty());
+        let backup = find_backup_dir(temp.path(), "content-root.schema-v2-backup-")?;
+        assert!(backup.join("installed.json").exists());
         Ok(())
     }
 
@@ -1469,6 +1803,75 @@ mod tests {
     }
 
     #[test]
+    fn publisher_keyring_round_trip() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(PathBuf::from(temp.path()));
+
+        let mut keyring = store.load_publisher_keyring()?;
+        keyring.keys.insert(
+            "dark-forest".to_string(),
+            super::PublisherKeyRecord {
+                publisher_id: "dark-forest".to_string(),
+                public_key_base64: "ZmFrZS1wdWJsaWMta2V5".to_string(),
+                fingerprint_sha256: "abc123".to_string(),
+                added_at: chrono::Utc::now(),
+            },
+        );
+        store.save_publisher_keyring(&keyring)?;
+
+        let reloaded = store.load_publisher_keyring()?;
+        let key = reloaded
+            .keys
+            .get("dark-forest")
+            .ok_or_else(|| anyhow!("missing publisher key"))?;
+        assert_eq!(key.publisher_id, "dark-forest");
+        assert_eq!(key.fingerprint_sha256, "abc123");
+        Ok(())
+    }
+
+    #[test]
+    fn keymap_profiles_round_trip() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = JsonContentStore::new(PathBuf::from(temp.path()));
+
+        let mut profiles = store.load_keymap_profiles()?;
+        profiles.active_profile = "vim".to_string();
+        profiles.profiles.insert(
+            "vim".to_string(),
+            super::KeymapProfile {
+                bindings: [("up".to_string(), "k".to_string())].into_iter().collect(),
+            },
+        );
+        profiles.game_overrides.insert(
+            "snake-plus".to_string(),
+            [("runner.pause".to_string(), "Space".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        store.save_keymap_profiles(&profiles)?;
+
+        let reloaded = store.load_keymap_profiles()?;
+        assert_eq!(reloaded.active_profile, "vim");
+        assert_eq!(
+            reloaded
+                .profiles
+                .get("vim")
+                .and_then(|profile| profile.bindings.get("up"))
+                .map(String::as_str),
+            Some("k")
+        );
+        assert_eq!(
+            reloaded
+                .game_overrides
+                .get("snake-plus")
+                .and_then(|override_map| override_map.get("runner.pause"))
+                .map(String::as_str),
+            Some("Space")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn update_drops_grants_for_removed_capabilities() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store = JsonContentStore::new(temp.path().to_path_buf());
@@ -1486,6 +1889,10 @@ mod tests {
             source: "index://fixture".to_string(),
             artifact_dir: artifact_v1,
             expected_sha256: None,
+            artifact_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         })?;
 
         let mut permissions = store.load_permissions()?;
@@ -1522,6 +1929,10 @@ mod tests {
             source: "index://fixture".to_string(),
             artifact_dir: artifact_v2,
             expected_sha256: None,
+            artifact_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         })?;
 
         let reloaded = store.load_permissions()?;
@@ -1555,6 +1966,10 @@ mod tests {
             source: "index://fixture".to_string(),
             artifact_dir: artifact_v1,
             expected_sha256: None,
+            artifact_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         })?;
 
         let mut permissions = store.load_permissions()?;
@@ -1582,6 +1997,10 @@ mod tests {
             source: "index://fixture".to_string(),
             artifact_dir: artifact_v2,
             expected_sha256: None,
+            artifact_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         })?;
 
         let reloaded = store.load_permissions()?;
@@ -1605,6 +2024,19 @@ mod tests {
             version,
             serde_json::json!(["terminal.raw_input"]),
         )
+    }
+
+    fn find_backup_dir(parent: &Path, prefix: &str) -> Result<PathBuf> {
+        for entry in std::fs::read_dir(parent)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.starts_with(prefix) {
+                return Ok(path);
+            }
+        }
+        Err(anyhow!("backup directory not found for prefix {prefix}"))
     }
 
     fn create_artifact_dir_with_permissions(

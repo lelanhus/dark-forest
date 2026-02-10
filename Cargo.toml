@@ -14,7 +14,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
@@ -22,6 +22,7 @@ authors = ["Dark Forest Contributors"]
 
 [workspace.dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 bitflags = "2.8"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 crossterm = "0.28"
@@ -29,6 +30,7 @@ directories = "6.0"
 rand = "0.9"
 rand_pcg = "0.9"
 ratatui = { version = "0.29", features = ["all-widgets"] }
+ring = "0.17"
 semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

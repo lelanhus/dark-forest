@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "content"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -382,13 +382,15 @@ dependencies = [
 
 [[package]]
 name = "creator"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "flate2",
  "plugin-host",
  "registry",
+ "ring",
  "semver",
  "serde",
  "serde_json",
@@ -434,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "dark-forest"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -502,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "diagnostics"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "crossterm",
  "serde",
@@ -702,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "games"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1346,7 +1348,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "plugin-host"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1661,7 +1663,7 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "registry"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1733,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -1929,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "shell"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "crossterm",
  "pretty_assertions",
@@ -2124,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "theme"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "ratatui",
 ]

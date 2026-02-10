@@ -26,6 +26,9 @@ pub enum Overlay {
     Notifications,
     Progress,
     ErrorDetail,
+    FilterEditor,
+    HotReloadPrompt,
+    ProcessPluginWarning,
     PermissionPrompt,
     RunnerPauseMenu,
     RunnerQuitConfirm,
@@ -66,6 +69,15 @@ pub struct GameItem {
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
+    pub source: String,
+    pub verified: bool,
+    pub publisher_id: Option<String>,
+    pub collections: Vec<String>,
+    pub compatibility: Option<String>,
+    pub permissions_summary: Vec<String>,
+    pub host_api_range: String,
+    pub changelog_url: Option<String>,
+    pub homepage: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,12 +92,23 @@ pub struct ShellState {
     pub list_index: usize,
     pub settings_index: usize,
     pub performance_mode: String,
+    pub keymap_active_profile: String,
+    pub prompt_sensitive_only: bool,
+    pub allow_process_plugins: bool,
+    pub allow_error_clipboard_copy: bool,
+    pub registry_locators: Vec<String>,
+    pub diagnostics_lines: Vec<String>,
     pub continue_game_id: Option<String>,
     pub command_palette_index: usize,
     pub search_query: String,
     pub installed_game_ids: Vec<String>,
     pub permission_audit_entries: Vec<PermissionAuditEntry>,
     pub permission_prompt: Option<PermissionPromptState>,
+    pub filter_verified_only: bool,
+    pub filter_source: Option<String>,
+    pub filter_collection: Option<String>,
+    pub hot_reload_prompt_game_id: Option<String>,
+    pub process_plugin_prompt_game_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +138,19 @@ pub enum ShellCommand {
         capability: Option<String>,
     },
     ResolvePermissionPrompt(PermissionPromptAction),
+    ResolveHotReloadPrompt {
+        reload_now: bool,
+    },
+    ResolveProcessPluginLaunch {
+        allow: bool,
+    },
     SetOverlay(Option<Overlay>),
     CyclePerformance,
+    CycleKeymapProfile,
+    TogglePromptSensitiveOnly,
+    ToggleAllowProcessPlugins,
+    ToggleAllowErrorClipboardCopy,
+    CopyLastErrorToClipboard,
     None,
 }
 
@@ -212,12 +246,23 @@ impl ShellState {
             list_index: 0,
             settings_index: 0,
             performance_mode: "auto".to_string(),
+            keymap_active_profile: "default".to_string(),
+            prompt_sensitive_only: true,
+            allow_process_plugins: false,
+            allow_error_clipboard_copy: false,
+            registry_locators: Vec::new(),
+            diagnostics_lines: Vec::new(),
             continue_game_id: None,
             command_palette_index: 0,
             search_query: String::new(),
             installed_game_ids: Vec::new(),
             permission_audit_entries: Vec::new(),
             permission_prompt: None,
+            filter_verified_only: false,
+            filter_source: None,
+            filter_collection: None,
+            hot_reload_prompt_game_id: None,
+            process_plugin_prompt_game_id: None,
         }
     }
 
@@ -250,6 +295,33 @@ impl ShellState {
         self.permission_prompt = prompt;
     }
 
+    pub fn set_hot_reload_prompt_game(&mut self, game_id: Option<String>) {
+        self.hot_reload_prompt_game_id = game_id;
+    }
+
+    pub fn set_process_plugin_prompt_game(&mut self, game_id: Option<String>) {
+        self.process_plugin_prompt_game_id = game_id;
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.filter_verified_only = false;
+        self.filter_source = None;
+        self.filter_collection = None;
+        self.normalize_list_index();
+    }
+
+    fn cycle_source_filter(&mut self) {
+        let next = match self.filter_source.as_deref() {
+            None => Some("builtin".to_string()),
+            Some("builtin") => Some("index".to_string()),
+            Some("index") => Some("github".to_string()),
+            Some("github") => None,
+            Some(_) => None,
+        };
+        self.filter_source = next;
+        self.normalize_list_index();
+    }
+
     fn is_installed_game_id(&self, id: &str) -> bool {
         self.installed_game_ids
             .iter()
@@ -273,6 +345,26 @@ impl ShellState {
     }
 
     fn game_matches_query(&self, game: &GameItem) -> bool {
+        if self.filter_verified_only && !game.verified {
+            return false;
+        }
+        if let Some(source_filter) = &self.filter_source
+            && !game
+                .source
+                .to_ascii_lowercase()
+                .contains(&source_filter.to_ascii_lowercase())
+        {
+            return false;
+        }
+        if let Some(collection_filter) = &self.filter_collection
+            && !game.collections.iter().any(|item| {
+                item.to_ascii_lowercase()
+                    .contains(&collection_filter.to_ascii_lowercase())
+            })
+        {
+            return false;
+        }
+
         let query = self.query();
         if query.is_empty() {
             return true;
@@ -543,6 +635,52 @@ impl ShellState {
                 )],
                 _ => vec![ShellCommand::None],
             },
+            Overlay::ErrorDetail => match key.code {
+                KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
+                KeyCode::Char('c') | KeyCode::Char('C') if self.allow_error_clipboard_copy => {
+                    vec![ShellCommand::CopyLastErrorToClipboard]
+                }
+                _ => vec![ShellCommand::None],
+            },
+            Overlay::FilterEditor => match key.code {
+                KeyCode::Char('1') => {
+                    self.filter_verified_only = !self.filter_verified_only;
+                    self.normalize_list_index();
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Char('2') => {
+                    self.cycle_source_filter();
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Char('3') => {
+                    self.clear_filters();
+                    vec![ShellCommand::None]
+                }
+                KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
+                _ => vec![ShellCommand::None],
+            },
+            Overlay::HotReloadPrompt => match key.code {
+                KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => vec![
+                    ShellCommand::ResolveHotReloadPrompt { reload_now: true },
+                    ShellCommand::SetOverlay(None),
+                ],
+                KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('L') => vec![
+                    ShellCommand::ResolveHotReloadPrompt { reload_now: false },
+                    ShellCommand::SetOverlay(None),
+                ],
+                _ => vec![ShellCommand::None],
+            },
+            Overlay::ProcessPluginWarning => match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => vec![
+                    ShellCommand::ResolveProcessPluginLaunch { allow: true },
+                    ShellCommand::SetOverlay(None),
+                ],
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => vec![
+                    ShellCommand::ResolveProcessPluginLaunch { allow: false },
+                    ShellCommand::SetOverlay(None),
+                ],
+                _ => vec![ShellCommand::None],
+            },
             _ => match key.code {
                 KeyCode::Esc => vec![ShellCommand::SetOverlay(None)],
                 KeyCode::Char('n') if overlay == Overlay::Help => {
@@ -657,12 +795,16 @@ impl ShellState {
                     .map(|id| vec![ShellCommand::RemoveInstalled(id)])
                     .unwrap_or_else(|| vec![ShellCommand::None])
             }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                vec![ShellCommand::SetOverlay(Some(Overlay::FilterEditor))]
+            }
             _ => vec![ShellCommand::None],
         }
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Vec<ShellCommand> {
-        let total_items = 1 + self.permission_audit_entries.len();
+        const SETTINGS_BASE_ITEMS: usize = 5;
+        let total_items = SETTINGS_BASE_ITEMS + self.permission_audit_entries.len();
         match key.code {
             KeyCode::Esc => vec![ShellCommand::OpenRoute(Route::Home)],
             KeyCode::Down | KeyCode::Char('j') => {
@@ -674,26 +816,29 @@ impl ShellState {
                     (self.settings_index + total_items.max(1) - 1) % total_items.max(1);
                 vec![ShellCommand::None]
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.settings_index == 0 {
-                    vec![ShellCommand::CyclePerformance]
-                } else if let Some(entry) =
-                    self.permission_audit_entries.get(self.settings_index - 1)
-                {
-                    vec![ShellCommand::RevokePermission {
-                        game_id: entry.game_id.clone(),
-                        capability: Some(entry.capability.clone()),
-                    }]
-                } else {
-                    vec![ShellCommand::None]
+            KeyCode::Enter | KeyCode::Char(' ') => match self.settings_index {
+                0 => vec![ShellCommand::CyclePerformance],
+                1 => vec![ShellCommand::CycleKeymapProfile],
+                2 => vec![ShellCommand::TogglePromptSensitiveOnly],
+                3 => vec![ShellCommand::ToggleAllowProcessPlugins],
+                4 => vec![ShellCommand::ToggleAllowErrorClipboardCopy],
+                idx => {
+                    let permission_idx = idx.saturating_sub(SETTINGS_BASE_ITEMS);
+                    if let Some(entry) = self.permission_audit_entries.get(permission_idx) {
+                        vec![ShellCommand::RevokePermission {
+                            game_id: entry.game_id.clone(),
+                            capability: Some(entry.capability.clone()),
+                        }]
+                    } else {
+                        vec![ShellCommand::None]
+                    }
                 }
-            }
+            },
             KeyCode::Char('x') | KeyCode::Char('X') => {
-                if self.settings_index == 0 {
+                let permission_idx = self.settings_index.saturating_sub(SETTINGS_BASE_ITEMS);
+                if self.settings_index < SETTINGS_BASE_ITEMS {
                     vec![ShellCommand::None]
-                } else if let Some(entry) =
-                    self.permission_audit_entries.get(self.settings_index - 1)
-                {
+                } else if let Some(entry) = self.permission_audit_entries.get(permission_idx) {
                     vec![ShellCommand::RevokePermission {
                         game_id: entry.game_id.clone(),
                         capability: Some(entry.capability.clone()),
@@ -995,7 +1140,17 @@ fn render_library(
 
     let detail = visible_games.get(selected).map_or_else(
         || "No game selected".to_string(),
-        |g| format!("{}\n\n{}\n\nPress Enter for detail.", g.name, g.description),
+        |g| {
+            let verified = if g.verified { "verified" } else { "unverified" };
+            let compatibility = g
+                .compatibility
+                .clone()
+                .unwrap_or_else(|| "compatibility unknown".to_string());
+            format!(
+                "{}\n\n{}\n\nSource: {}\nTrust: {}\n{}\n\nPress Enter for detail.",
+                g.name, g.description, g.source, verified, compatibility
+            )
+        },
     );
     frame.render_widget(
         Paragraph::new(detail)
@@ -1095,15 +1250,64 @@ fn render_installed(
 }
 
 fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellState) {
+    const SETTINGS_BASE_ITEMS: usize = 5;
     let mut content = vec![
         Line::from(Span::styled("Settings", title_style())),
         Line::from(""),
     ];
-    let perf_marker = if state.settings_index == 0 { ">" } else { " " };
+    let marker = |idx: usize| {
+        if state.settings_index == idx {
+            ">"
+        } else {
+            " "
+        }
+    };
     content.push(Line::from(format!(
-        "{perf_marker} Performance: {} (Enter to cycle Auto/60/30)",
+        "{} Performance: {} (Enter to cycle Auto/60/30)",
+        marker(0),
         state.performance_mode
     )));
+    content.push(Line::from(format!(
+        "{} Keymap profile: {} (Enter to cycle profiles)",
+        marker(1),
+        state.keymap_active_profile
+    )));
+    content.push(Line::from(format!(
+        "{} Prompt sensitive capabilities only: {}",
+        marker(2),
+        state.prompt_sensitive_only
+    )));
+    content.push(Line::from(format!(
+        "{} Allow third-party process plugins: {}",
+        marker(3),
+        state.allow_process_plugins
+    )));
+    content.push(Line::from(format!(
+        "{} Allow clipboard copy in error modal: {}",
+        marker(4),
+        state.allow_error_clipboard_copy
+    )));
+
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled("Registries:", muted_style())));
+    if state.registry_locators.is_empty() {
+        content.push(Line::from("  none configured"));
+    } else {
+        for locator in &state.registry_locators {
+            content.push(Line::from(format!("  - {locator}")));
+        }
+    }
+
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled("Diagnostics:", muted_style())));
+    if state.diagnostics_lines.is_empty() {
+        content.push(Line::from("  no diagnostics yet"));
+    } else {
+        for line in &state.diagnostics_lines {
+            content.push(Line::from(format!("  {line}")));
+        }
+    }
+
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
         "Permissions Audit (select entry and press Enter/X to revoke):",
@@ -1114,19 +1318,17 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ShellStat
         content.push(Line::from("  no remembered grants"));
     } else {
         for (idx, entry) in state.permission_audit_entries.iter().enumerate() {
-            let marker = if state.settings_index == idx + 1 {
-                ">"
-            } else {
-                " "
-            };
             let memory = if entry.remembered {
                 "remembered"
             } else {
                 "session"
             };
             content.push(Line::from(format!(
-                "{marker} {} :: {} ({}, {memory})",
-                entry.game_id, entry.capability, entry.decision
+                "{} {} :: {} ({}, {memory})",
+                marker(idx + SETTINGS_BASE_ITEMS),
+                entry.game_id,
+                entry.capability,
+                entry.decision
             )));
         }
     }
@@ -1168,19 +1370,43 @@ fn render_detail(
     let text = selected.map_or_else(
         || format!("Unknown game: {id}"),
         |game| {
+            let trust = if game.verified {
+                "Verified publisher"
+            } else {
+                "Unverified publisher"
+            };
+            let install_action = if is_installed {
+                "X: remove installed copy"
+            } else {
+                "[I] Install from registry"
+            };
+            let collection = if game.collections.is_empty() {
+                "none".to_string()
+            } else {
+                game.collections.join(", ")
+            };
+            let permissions = if game.permissions_summary.is_empty() {
+                "none".to_string()
+            } else {
+                game.permissions_summary.join(", ")
+            };
             format!(
-                "{}\n\n{}\n\nVersion: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nActions:\n- Enter: start game{}\n- Esc: back",
+                "{}\n\n{}\n\nActions:\n- Enter: start game\n- {}\n- Esc: back\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nVersion: {}\nSource: {}\nTrust: {}\nPublisher: {}\nCollections: {}\nPermissions: {}\nHost API: {}\nHomepage: {}\nChangelog: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc",
                 game.name,
                 game.description,
-                version,
+                install_action,
                 stats.play_count,
                 best_score,
                 last_played,
-                if is_installed {
-                    "\n- X: remove installed copy"
-                } else {
-                    "\n- [I] Install from registry"
-                }
+                version,
+                game.source,
+                trust,
+                game.publisher_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                collection,
+                permissions,
+                game.host_api_range,
+                game.homepage.clone().unwrap_or_else(|| "n/a".to_string()),
+                game.changelog_url.clone().unwrap_or_else(|| "n/a".to_string())
             )
         },
     );
@@ -1333,7 +1559,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
         Overlay::Search => ("Search", search_overlay_body(state)),
         Overlay::Help => (
             "Help",
-            "Global: ↑/↓ or j/k, Enter, Esc, /, Ctrl+K, ?, Ctrl+Q\nRunner: P, R, F, Esc\nPermissions prompt: 1 Allow Once, 2 Allow Always, 3 Deny Once, 4 Deny Always"
+            "Global: ↑/↓ or j/k, Enter, Esc, /, Ctrl+K, ?, Ctrl+Q\nLibrary/Installed: G filter editor\nRunner: P, R, F, Esc\nPermissions prompt: 1 Allow Once, 2 Allow Always, 3 Deny Once, 4 Deny Always"
                 .to_string(),
         ),
         Overlay::Notifications => (
@@ -1354,10 +1580,49 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
         ),
         Overlay::ErrorDetail => (
             "Error",
-            state
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "No error details available".to_string()),
+            format!(
+                "{}\n\n{}",
+                state
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "No error details available".to_string()),
+                if state.allow_error_clipboard_copy {
+                    "Press C to copy this error to clipboard, Esc to close."
+                } else {
+                    "Clipboard copy disabled in settings. Press Esc to close."
+                }
+            ),
+        ),
+        Overlay::FilterEditor => (
+            "Filter Editor",
+            format!(
+                "1) Toggle verified-only: {}\n2) Cycle source filter: {}\n3) Clear filters\n\nPress Esc to close.",
+                state.filter_verified_only,
+                state
+                    .filter_source
+                    .clone()
+                    .unwrap_or_else(|| "any".to_string())
+            ),
+        ),
+        Overlay::HotReloadPrompt => (
+            "Reload Updated Game?",
+            format!(
+                "Game '{}' has an updated install.\n\nPress Enter/R to reload now.\nPress Esc/L to reload later.",
+                state
+                    .hot_reload_prompt_game_id
+                    .clone()
+                    .unwrap_or_else(|| "current game".to_string())
+            ),
+        ),
+        Overlay::ProcessPluginWarning => (
+            "Process Plugin Warning",
+            format!(
+                "Game '{}' requests process-plugin execution.\n\nThis can spawn external processes on your system.\n\nPress Enter/Y to continue launch.\nPress Esc/N to cancel.",
+                state
+                    .process_plugin_prompt_game_id
+                    .clone()
+                    .unwrap_or_else(|| "selected game".to_string())
+            ),
         ),
         Overlay::PermissionPrompt => {
             let body = state.permission_prompt.clone().map_or_else(
@@ -1611,6 +1876,15 @@ mod tests {
                 name: "Snake+".to_string(),
                 description: "Arcade loop".to_string(),
                 tags: vec!["arcade".to_string(), "builtin".to_string()],
+                source: "builtin://dark-forest".to_string(),
+                verified: true,
+                publisher_id: Some("dark-forest".to_string()),
+                collections: vec!["Featured".to_string()],
+                compatibility: Some("host_api=compatible, permissions=low-risk".to_string()),
+                permissions_summary: vec!["terminal.raw_input".to_string()],
+                host_api_range: "^0.1".to_string(),
+                changelog_url: None,
+                homepage: None,
             },
             GameItem {
                 id: "tetris-like".to_string(),
@@ -1621,6 +1895,15 @@ mod tests {
                     "puzzle".to_string(),
                     "builtin".to_string(),
                 ],
+                source: "builtin://dark-forest".to_string(),
+                verified: true,
+                publisher_id: Some("dark-forest".to_string()),
+                collections: vec!["Featured".to_string()],
+                compatibility: Some("host_api=compatible, permissions=low-risk".to_string()),
+                permissions_summary: vec!["terminal.raw_input".to_string()],
+                host_api_range: "^0.1".to_string(),
+                changelog_url: None,
+                homepage: None,
             },
         ]
     }
@@ -2053,7 +2336,7 @@ mod tests {
             decision: "allow".to_string(),
             remembered: true,
         }]);
-        state.settings_index = 1;
+        state.settings_index = 5;
 
         let commands = state.handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
@@ -2066,6 +2349,46 @@ mod tests {
                 game_id: "remote-wasm".to_string(),
                 capability: Some("net".to_string())
             }]
+        );
+    }
+
+    #[test]
+    fn settings_route_cycles_keymap_profile() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Settings;
+        state.settings_index = 1;
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(commands, vec![ShellCommand::CycleKeymapProfile]);
+    }
+
+    #[test]
+    fn error_overlay_copy_command_respects_toggle() {
+        let mut state = ShellState::new(sample_games());
+        state.overlay = Some(Overlay::ErrorDetail);
+        state.last_error = Some("boom".to_string());
+        state.allow_error_clipboard_copy = false;
+
+        let commands_disabled = state.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(commands_disabled, vec![ShellCommand::None]);
+
+        state.allow_error_clipboard_copy = true;
+        let commands_enabled = state.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            commands_enabled,
+            vec![ShellCommand::CopyLastErrorToClipboard]
         );
     }
 
@@ -2089,6 +2412,26 @@ mod tests {
             vec![ShellCommand::ResolvePermissionPrompt(
                 PermissionPromptAction::AllowAlways
             )]
+        );
+    }
+
+    #[test]
+    fn process_plugin_warning_overlay_emits_resolution_command() {
+        let mut state = ShellState::new(sample_games());
+        state.overlay = Some(Overlay::ProcessPluginWarning);
+        state.set_process_plugin_prompt_game(Some("remote-proc".to_string()));
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            false,
+            false,
+        );
+        assert_eq!(
+            commands,
+            vec![
+                ShellCommand::ResolveProcessPluginLaunch { allow: true },
+                ShellCommand::SetOverlay(None)
+            ]
         );
     }
 }

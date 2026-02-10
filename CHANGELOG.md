@@ -6,45 +6,52 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-02-10
+
 ### Added
 
-- `crates/creator` crate for creator-tooling package/verification workflows.
-- New creator CLI modes:
-  - `--init-template <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]`
-  - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
-  - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
-  - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
-  - `--dev <game_dir> --index <locator> [--out <artifact.tar.gz>]`
-    `[--metadata-out <metadata.json>] [--watch] [--interval-ms <ms>]`
-    `[--dry-run] [--replace]`
-- Deterministic `.tar.gz` packaging flow with normalized archive headers and stable file ordering.
-- Creator metadata sidecar JSON for packaged artifacts:
-  - `schema_version`
-  - `game_id`
-  - `version`
-  - `entry_type`
-  - `host_api`
-  - `artifact_file`
-  - `artifact_sha256`
-  - `artifact_size_bytes`
-  - `generated_at`
-- Local index publish flow that stages artifact files near the target index and upserts catalog
-  game/version entries.
-- Publish controls for dry-run planning and explicit replacement of existing version artifacts when
-  checksums differ.
-- Creator dev loop API + CLI workflow that runs pack/verify/publish as one cycle or watches for
-  local file changes and repeats automatically.
-- Marketplace publish quality gates:
-  - reject manifests that do not declare a `permissions` field
-  - reject manifests whose `host_api` range is incompatible with host API `0.1.0`
-- Starter creator template scaffold at `templates/wasm-basic`.
-- Creator hot-reload documentation in `docs/CREATOR_WORKFLOW.md`.
-- Template initialization workflow via creator CLI `--init-template`.
+- Signature-aware creator workflows:
+  - `--keygen <publisher_id> --out-dir <dir>`
+  - `--sign-artifact <artifact> --publisher-id <id> --private-key <pk8>`
+- Publisher trust keyring management CLI:
+  - `--publisher-key-list`
+  - `--publisher-key-add <publisher_id> <public_key_base64>`
+  - `--publisher-key-remove <publisher_id>`
+- Keymap profile import/export CLI:
+  - `--keymap-export <path>`
+  - `--keymap-import <path>`
+- `--reinstall <id>` content operation using persisted install provenance.
+- `github://owner/repo@tag` registry provider support with release-asset catalog retrieval and cache
+  fallback.
+- Install-time third-party verification:
+  - required artifact checksum
+  - detached signature fetch
+  - trusted publisher lookup
+  - Ed25519 signature verification
+- Persisted install provenance fields (`artifact_uri`, checksum, publisher, signature fingerprint,
+  verification timestamp).
+- Marketplace/listing metadata expansion:
+  - verified status
+  - publisher id
+  - collections
+  - compatibility badges
+- Shell filter/editor and detail metadata expansion for source/trust/compatibility context.
+- Process-plugin launch warning confirmation overlay when process plugins are enabled.
+- Error modal copy-to-clipboard action gated by settings and platform support.
+- Keymap runtime precedence behavior:
+  - per-game override > active profile > default profile
+  - per-game overrides apply only in runner context
+- Schema `3` backup/reinitialize policy for legacy on-disk roots.
 
 ### Changed
 
-- Roadmap milestone `M7` status moved to complete for creator pack/verify/publish/dev plus
-  template docs and marketplace quality gates.
+- Workspace/package version baseline moved to `2.0.0`.
+- Content/settings schema baseline moved to `3`.
+- Creator metadata schema baseline moved to `2` with signature fields.
+- Registry catalog/index contracts now use `artifact_sha256` and signature/publisher metadata.
+- Interactive settings route now exposes keymap profile/security toggles plus diagnostics and
+  registry visibility.
+- Hot-load behavior for active games now uses explicit `Reload now`/`Later` prompt flow.
 
 ## [1.0.0] - 2026-02-10
 
