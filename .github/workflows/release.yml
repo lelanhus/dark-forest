@@ -57,12 +57,11 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Linux aarch64 toolchain
+      - name: Install Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config libssl-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Resolve artifact names
         id: meta
@@ -81,9 +80,6 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_LIBDIR: /usr/lib/aarch64-linux-gnu/pkgconfig
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: cargo build --release -p dark-forest --target "${{ matrix.target }}"
 
       - name: Replay smoke test (Unix)
