@@ -19,7 +19,11 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, terminal};
 use diagnostics::{DiagnosticsSnapshot, PerfDiagnostics, detect_terminal_capabilities};
 use games::builtin_catalog;
-use plugin_host::{PluginManifest, WasmGameAdapter, validate_entry_type};
+use plugin_host::{
+    Capability, CapabilityDecision, CapabilityEnforcer, CapabilityRequest, Decision,
+    PermissionPromptRequest, PluginManifest, Scope, WasmGameAdapter, capability_label,
+    validate_entry_type,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{
@@ -45,6 +49,7 @@ enum LaunchMode {
     Replay { path: PathBuf },
     Operation(ContentOperation),
     Registry(RegistryCommand),
+    Permissions(PermissionsCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +57,17 @@ enum RegistryCommand {
     List,
     Add { locator: String },
     Remove { locator: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PermissionsCommand {
+    List {
+        game_id: Option<String>,
+    },
+    Revoke {
+        game_id: String,
+        capability: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,11 +156,92 @@ struct RegistryCommandReport {
     registry_locators: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PermissionsCommandReport {
+    command: String,
+    success: bool,
+    message: String,
+    grants: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct MarketplaceCatalogSnapshot {
     games: Vec<shell::GameItem>,
     install_locators: BTreeMap<String, String>,
     warnings: Vec<String>,
+}
+
+struct AppCapabilityEnforcer {
+    permissions: std::sync::Arc<std::sync::Mutex<content::PermissionsFile>>,
+    session_decisions: std::sync::Arc<std::sync::Mutex<BTreeMap<(String, Capability), Decision>>>,
+    prompt_queue: std::sync::Arc<std::sync::Mutex<Vec<PermissionPromptRequest>>>,
+}
+
+impl CapabilityEnforcer for AppCapabilityEnforcer {
+    fn evaluate(&self, request: &CapabilityRequest) -> Result<CapabilityDecision> {
+        if let Ok(session) = self.session_decisions.lock()
+            && let Some(decision) = session.get(&(request.game_id.clone(), request.capability))
+        {
+            return Ok(CapabilityDecision {
+                decision: *decision,
+                remembered: false,
+                reason: Some("session decision".to_string()),
+            });
+        }
+
+        if let Ok(permissions) = self.permissions.lock()
+            && let Some(grants) = permissions.grants.get(&request.game_id)
+            && let Some(grant) = grants
+                .iter()
+                .find(|grant| grant.capability == request.capability && grant.remembered)
+        {
+            return Ok(CapabilityDecision {
+                decision: grant.decision,
+                remembered: true,
+                reason: Some("persisted decision".to_string()),
+            });
+        }
+
+        let default_decision = match request.capability {
+            Capability::Clock | Capability::Random | Capability::TerminalRawInput => {
+                Decision::Allow
+            }
+            Capability::FsWrite | Capability::Net | Capability::OpenUrl | Capability::Clipboard => {
+                if let Ok(mut queue) = self.prompt_queue.lock() {
+                    let already_queued = queue.iter().any(|existing| {
+                        existing.game_id == request.game_id
+                            && existing.capability == request.capability
+                    });
+                    if !already_queued {
+                        queue.push(PermissionPromptRequest {
+                            game_id: request.game_id.clone(),
+                            capability: request.capability,
+                            scope: request.scope.clone(),
+                            prompt: format!(
+                                "Allow capability '{}' for {}?",
+                                capability_label(request.capability),
+                                request.game_id
+                            ),
+                        });
+                    }
+                }
+                Decision::Deny
+            }
+            Capability::FsRead => Decision::Deny,
+        };
+
+        let reason = if default_decision == Decision::Allow {
+            Some("default low-risk capability policy".to_string())
+        } else {
+            Some("default deny until explicit decision".to_string())
+        };
+
+        Ok(CapabilityDecision {
+            decision: default_decision,
+            remembered: false,
+            reason,
+        })
+    }
 }
 
 struct AppModel {
@@ -154,6 +251,13 @@ struct AppModel {
     settings: content::Settings,
     play_history: content::PlayHistoryMap,
     installed: content::InstalledFile,
+    permissions: content::PermissionsFile,
+    shared_permissions: std::sync::Arc<std::sync::Mutex<content::PermissionsFile>>,
+    session_permission_decisions:
+        std::sync::Arc<std::sync::Mutex<BTreeMap<(String, Capability), Decision>>>,
+    permission_prompt_queue: std::sync::Arc<std::sync::Mutex<Vec<PermissionPromptRequest>>>,
+    active_permission_prompt: Option<PermissionPromptRequest>,
+    paused_for_permission_prompt: bool,
     best_scores: BTreeMap<String, i64>,
     current_game_id: Option<String>,
     current_game_seed: Option<u64>,
@@ -203,6 +307,8 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --registry-list");
             println!("  dark-forest --registry-add <locator>");
             println!("  dark-forest --registry-remove <locator>");
+            println!("  dark-forest --permissions-list [<game_id>]");
+            println!("  dark-forest --permissions-revoke <game_id> [--capability <cap>]");
             std::process::exit(0);
         }
         "--replay" => {
@@ -323,6 +429,48 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             }
             Ok(LaunchMode::Registry(RegistryCommand::Remove {
                 locator: args[1].clone(),
+            }))
+        }
+        "--permissions-list" => {
+            if args.len() > 2 {
+                return Err(anyhow!(
+                    "--permissions-list accepts at most one optional game id"
+                ));
+            }
+            Ok(LaunchMode::Permissions(PermissionsCommand::List {
+                game_id: args.get(1).cloned(),
+            }))
+        }
+        "--permissions-revoke" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--permissions-revoke requires <game_id> [--capability <cap>]"
+                ));
+            }
+
+            let game_id = args[1].clone();
+            let mut capability = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--capability" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--capability requires a value"));
+                        }
+                        capability = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!(
+                            "unknown argument for --permissions-revoke: {other}"
+                        ));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Permissions(PermissionsCommand::Revoke {
+                game_id,
+                capability,
             }))
         }
         other => Err(anyhow!("unknown argument: {other}")),
@@ -467,6 +615,167 @@ fn run_registry_cli(command: RegistryCommand) -> Result<()> {
     }
 }
 
+fn parse_capability_label(raw: &str) -> Option<Capability> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "fs.read" | "fs_read" => Some(Capability::FsRead),
+        "fs.write" | "fs_write" => Some(Capability::FsWrite),
+        "net" => Some(Capability::Net),
+        "open_url" | "open.url" | "open-url" => Some(Capability::OpenUrl),
+        "clipboard" => Some(Capability::Clipboard),
+        "clock" => Some(Capability::Clock),
+        "random" => Some(Capability::Random),
+        "terminal.raw_input" | "terminal_raw_input" => Some(Capability::TerminalRawInput),
+        _ => None,
+    }
+}
+
+fn decision_label(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Allow => "allow",
+        Decision::Deny => "deny",
+    }
+}
+
+fn scope_label(scope: &Scope) -> String {
+    match scope {
+        Scope::None => "none".to_string(),
+        Scope::Prompt => "prompt".to_string(),
+        Scope::Path(path) => format!("path:{path}"),
+        Scope::Paths(paths) => format!("paths:[{}]", paths.join(",")),
+        Scope::Allowlist(entries) => format!("allowlist:[{}]", entries.join(",")),
+    }
+}
+
+fn revoke_permissions(
+    permissions: &mut content::PermissionsFile,
+    game_id: &str,
+    capability: Option<Capability>,
+) -> usize {
+    match capability {
+        None => permissions
+            .grants
+            .remove(game_id)
+            .map_or(0, |existing| existing.len()),
+        Some(capability) => {
+            let Some(grants) = permissions.grants.get_mut(game_id) else {
+                return 0;
+            };
+            let before = grants.len();
+            grants.retain(|grant| grant.capability != capability);
+            let removed = before.saturating_sub(grants.len());
+            if grants.is_empty() {
+                permissions.grants.remove(game_id);
+            }
+            removed
+        }
+    }
+}
+
+fn flatten_permission_grants(
+    permissions: &content::PermissionsFile,
+    game_filter: Option<&str>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (game_id, grants) in &permissions.grants {
+        if let Some(filter) = game_filter
+            && filter != game_id
+        {
+            continue;
+        }
+
+        let mut sorted = grants.clone();
+        sorted.sort_by_key(|grant| capability_label(grant.capability).to_string());
+        for grant in sorted {
+            lines.push(format!(
+                "{game_id}|capability={}|decision={}|remembered={}|scope={}",
+                capability_label(grant.capability),
+                decision_label(grant.decision),
+                grant.remembered,
+                scope_label(&grant.scope)
+            ));
+        }
+    }
+    lines
+}
+
+fn execute_permissions_command(
+    root: PathBuf,
+    command: PermissionsCommand,
+) -> Result<PermissionsCommandReport> {
+    let store = JsonContentStore::new(root);
+    store.ensure_layout()?;
+    let mut permissions = store.load_permissions()?;
+
+    match command {
+        PermissionsCommand::List { game_id } => {
+            let lines = flatten_permission_grants(&permissions, game_id.as_deref());
+            Ok(PermissionsCommandReport {
+                command: "permissions-list".to_string(),
+                success: true,
+                message: format!("{} permission grants", lines.len()),
+                grants: lines,
+            })
+        }
+        PermissionsCommand::Revoke {
+            game_id,
+            capability,
+        } => {
+            let parsed = match capability.as_deref() {
+                Some(label) => Some(
+                    parse_capability_label(label)
+                        .ok_or_else(|| anyhow!("unknown capability label: {label}"))?,
+                ),
+                None => None,
+            };
+
+            let removed = revoke_permissions(&mut permissions, &game_id, parsed);
+            if removed == 0 {
+                return Ok(PermissionsCommandReport {
+                    command: "permissions-revoke".to_string(),
+                    success: false,
+                    message: if let Some(label) = capability {
+                        format!("no grants found for {game_id}:{label}")
+                    } else {
+                        format!("no grants found for game {game_id}")
+                    },
+                    grants: flatten_permission_grants(&permissions, Some(&game_id)),
+                });
+            }
+
+            store.save_permissions(&permissions)?;
+            Ok(PermissionsCommandReport {
+                command: "permissions-revoke".to_string(),
+                success: true,
+                message: if let Some(label) = capability {
+                    format!("revoked {removed} grant(s) for {game_id}:{label}")
+                } else {
+                    format!("revoked {removed} grant(s) for game {game_id}")
+                },
+                grants: flatten_permission_grants(&permissions, Some(&game_id)),
+            })
+        }
+    }
+}
+
+fn run_permissions_cli(command: PermissionsCommand) -> Result<()> {
+    let store = JsonContentStore::create_with_default_root()?;
+    let report = execute_permissions_command(store.root().to_path_buf(), command)?;
+
+    println!("command={}", report.command);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+    println!("grant_count={}", report.grants.len());
+    for (idx, line) in report.grants.iter().enumerate() {
+        println!("grant[{idx}]={line}");
+    }
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
 fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
     history
         .iter()
@@ -540,11 +849,22 @@ fn to_plugin_manifest(manifest: registry::Manifest) -> PluginManifest {
     }
 }
 
+#[cfg(test)]
 fn create_game_instance(
     root: &Path,
     installed: &content::InstalledFile,
     game_id: &str,
     seed: u64,
+) -> Result<Box<dyn runtime::Game + Send>> {
+    create_game_instance_with_enforcer(root, installed, game_id, seed, None)
+}
+
+fn create_game_instance_with_enforcer(
+    root: &Path,
+    installed: &content::InstalledFile,
+    game_id: &str,
+    seed: u64,
+    enforcer: Option<std::sync::Arc<dyn CapabilityEnforcer>>,
 ) -> Result<Box<dyn runtime::Game + Send>> {
     if let Some(record) = installed.installed.iter().find(|item| item.id == game_id) {
         if record.source.starts_with("builtin://") {
@@ -574,7 +894,13 @@ fn create_game_instance(
 
         return match parsed.entry_type {
             plugin_host::EntryType::Wasm => {
-                let game = WasmGameAdapter::new(to_plugin_manifest(parsed), artifact_dir)?;
+                let resolved_enforcer = enforcer
+                    .unwrap_or_else(|| std::sync::Arc::new(plugin_host::DefaultCapabilityEnforcer));
+                let game = WasmGameAdapter::with_enforcer(
+                    to_plugin_manifest(parsed),
+                    artifact_dir,
+                    resolved_enforcer,
+                )?;
                 Ok(Box::new(game))
             }
             plugin_host::EntryType::Native => Err(anyhow!(
@@ -897,6 +1223,7 @@ impl AppModel {
         let settings = store.load_settings()?;
         let play_history = store.load_play_history()?;
         let installed = ensure_builtin_installed(store.load_installed()?, &builtin_games);
+        let permissions = store.load_permissions()?;
         let _ = store.save_installed(&installed);
         let mut best_scores = BTreeMap::new();
 
@@ -929,6 +1256,14 @@ impl AppModel {
             settings,
             play_history,
             installed,
+            shared_permissions: std::sync::Arc::new(std::sync::Mutex::new(permissions.clone())),
+            permissions,
+            session_permission_decisions: std::sync::Arc::new(std::sync::Mutex::new(
+                BTreeMap::new(),
+            )),
+            permission_prompt_queue: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            active_permission_prompt: None,
+            paused_for_permission_prompt: false,
             best_scores,
             current_game_id: None,
             current_game_seed: None,
@@ -942,6 +1277,7 @@ impl AppModel {
         };
 
         model.refresh_game_catalog();
+        model.refresh_permission_audit_entries();
         Ok(model)
     }
 
@@ -975,6 +1311,133 @@ impl AppModel {
                 .map(|item| item.id.clone())
                 .collect(),
         );
+    }
+
+    fn sync_shared_permissions(&self) {
+        if let Ok(mut shared) = self.shared_permissions.lock() {
+            *shared = self.permissions.clone();
+        }
+    }
+
+    fn refresh_permission_audit_entries(&mut self) {
+        let mut entries = Vec::new();
+        for (game_id, grants) in &self.permissions.grants {
+            let mut sorted = grants.clone();
+            sorted.sort_by_key(|grant| capability_label(grant.capability).to_string());
+            for grant in sorted {
+                entries.push(shell::PermissionAuditEntry {
+                    game_id: game_id.clone(),
+                    capability: capability_label(grant.capability).to_string(),
+                    decision: match grant.decision {
+                        Decision::Allow => "allow".to_string(),
+                        Decision::Deny => "deny".to_string(),
+                    },
+                    remembered: grant.remembered,
+                });
+            }
+        }
+        self.shell.set_permission_audit_entries(entries);
+    }
+
+    fn maybe_show_permission_prompt(&mut self) {
+        if self.active_permission_prompt.is_some() {
+            return;
+        }
+
+        let next_prompt = if let Ok(mut queue) = self.permission_prompt_queue.lock() {
+            if queue.is_empty() {
+                None
+            } else {
+                Some(queue.remove(0))
+            }
+        } else {
+            None
+        };
+
+        let Some(prompt) = next_prompt else {
+            return;
+        };
+
+        self.shell
+            .set_permission_prompt(Some(shell::PermissionPromptState {
+                game_id: prompt.game_id.clone(),
+                capability: capability_label(prompt.capability).to_string(),
+                prompt: prompt.prompt.clone(),
+            }));
+        self.shell.overlay = Some(shell::Overlay::PermissionPrompt);
+        self.active_permission_prompt = Some(prompt);
+
+        if self.runner.is_running() && !self.runner.is_paused() {
+            self.runner.toggle_pause();
+            self.paused_for_permission_prompt = true;
+        }
+    }
+
+    fn resolve_permission_prompt(&mut self, action: shell::PermissionPromptAction) {
+        let Some(prompt) = self.active_permission_prompt.take() else {
+            return;
+        };
+
+        let (decision, remember) = match action {
+            shell::PermissionPromptAction::AllowOnce => (Decision::Allow, false),
+            shell::PermissionPromptAction::AllowAlways => (Decision::Allow, true),
+            shell::PermissionPromptAction::DenyOnce => (Decision::Deny, false),
+            shell::PermissionPromptAction::DenyAlways => (Decision::Deny, true),
+        };
+
+        if let Ok(mut session) = self.session_permission_decisions.lock() {
+            session.insert((prompt.game_id.clone(), prompt.capability), decision);
+        }
+
+        if remember {
+            let grants = self
+                .permissions
+                .grants
+                .entry(prompt.game_id.clone())
+                .or_default();
+            if let Some(existing) = grants
+                .iter_mut()
+                .find(|entry| entry.capability == prompt.capability)
+            {
+                existing.decision = decision;
+                existing.scope = prompt.scope.clone();
+                existing.remembered = true;
+                existing.granted_at = Utc::now();
+            } else {
+                grants.push(content::PermissionGrant {
+                    capability: prompt.capability,
+                    scope: prompt.scope.clone(),
+                    decision,
+                    remembered: true,
+                    granted_at: Utc::now(),
+                });
+            }
+
+            if let Err(err) = self.store.save_permissions(&self.permissions) {
+                self.shell
+                    .set_error(format!("failed to save permission decision: {err}"));
+            } else {
+                self.sync_shared_permissions();
+                self.refresh_permission_audit_entries();
+            }
+        }
+
+        self.shell.set_permission_prompt(None);
+        self.shell.overlay = None;
+        if self.paused_for_permission_prompt && self.runner.is_paused() {
+            self.runner.toggle_pause();
+        }
+        self.paused_for_permission_prompt = false;
+        self.shell.push_notification(format!(
+            "Permission decision for {}:{} -> {}",
+            prompt.game_id,
+            capability_label(prompt.capability),
+            if decision == Decision::Allow {
+                "allow"
+            } else {
+                "deny"
+            }
+        ));
     }
 
     fn apply_marketplace_snapshot(&mut self, snapshot: MarketplaceCatalogSnapshot) {
@@ -1020,6 +1483,14 @@ impl AppModel {
         previous_active_version.is_some() && previous_active_version != next_active_version
     }
 
+    fn refresh_permissions_state(&mut self) {
+        if let Ok(permissions) = self.store.load_permissions() {
+            self.permissions = permissions;
+            self.sync_shared_permissions();
+            self.refresh_permission_audit_entries();
+        }
+    }
+
     fn cycle_performance_mode(&mut self) {
         self.settings.performance_mode = match self.settings.performance_mode.as_str() {
             "auto" => "60".to_string(),
@@ -1039,7 +1510,18 @@ impl AppModel {
 
     fn start_game(&mut self, game_id: &str) {
         let seed = self.next_seed();
-        match create_game_instance(self.store.root(), &self.installed, game_id, seed) {
+        let enforcer = std::sync::Arc::new(AppCapabilityEnforcer {
+            permissions: std::sync::Arc::clone(&self.shared_permissions),
+            session_decisions: std::sync::Arc::clone(&self.session_permission_decisions),
+            prompt_queue: std::sync::Arc::clone(&self.permission_prompt_queue),
+        });
+        match create_game_instance_with_enforcer(
+            self.store.root(),
+            &self.installed,
+            game_id,
+            seed,
+            Some(enforcer),
+        ) {
             Ok(game) => {
                 if let Err(err) = self.runner.start(game, seed) {
                     self.shell.set_error(format!("failed to start game: {err}"));
@@ -1127,6 +1609,8 @@ impl AppModel {
             | ShellCommand::RollbackInstalled(_)
             | ShellCommand::VerifyInstalled(_)
             | ShellCommand::RemoveInstalled(_)
+            | ShellCommand::RevokePermission { .. }
+            | ShellCommand::ResolvePermissionPrompt(_)
             | ShellCommand::None => {}
         }
 
@@ -1162,6 +1646,7 @@ impl AppModel {
 
         if report.success {
             self.shell.push_notification(report.message);
+            self.refresh_permissions_state();
             if report.installed_changed {
                 let active_changed = self.refresh_installed_state();
                 if active_changed {
@@ -1289,6 +1774,7 @@ async fn main() -> Result<()> {
         LaunchMode::Replay { path } => run_replay_cli(&path),
         LaunchMode::Operation(operation) => run_operation_cli(operation),
         LaunchMode::Registry(command) => run_registry_cli(command),
+        LaunchMode::Permissions(command) => run_permissions_cli(command),
     }
 }
 
@@ -1444,6 +1930,8 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                         model.apply_runner_signal(signal);
                     }
 
+                    model.maybe_show_permission_prompt();
+
                     if model.runner.game_finished() {
                         let previous_game_id = model.current_game_id.clone();
                         model.stop_game();
@@ -1461,6 +1949,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                             "Installed content changed. Restart active game to apply.",
                         );
                     }
+                    model.refresh_permissions_state();
                 }
                 AppEvent::MarketplaceCatalogLoaded(snapshot) => {
                     model.apply_marketplace_snapshot(snapshot);
@@ -1531,6 +2020,52 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                                     &operation_tx,
                                     ContentOperation::Remove { game_id: id },
                                 ),
+                                ShellCommand::RevokePermission {
+                                    game_id,
+                                    capability,
+                                } => {
+                                    let parsed =
+                                        capability.as_deref().and_then(parse_capability_label);
+                                    let removed = revoke_permissions(
+                                        &mut model.permissions,
+                                        &game_id,
+                                        parsed,
+                                    );
+                                    if removed == 0 {
+                                        model.shell.set_error(if let Some(capability) = capability {
+                                            format!(
+                                                "no permission grants to revoke for {game_id}:{capability}"
+                                            )
+                                        } else {
+                                            format!("no permission grants to revoke for {game_id}")
+                                        });
+                                        continue;
+                                    }
+
+                                    if let Err(err) =
+                                        model.store.save_permissions(&model.permissions)
+                                    {
+                                        model.shell.set_error(format!(
+                                            "failed to persist permission revoke: {err}"
+                                        ));
+                                        continue;
+                                    }
+
+                                    model.sync_shared_permissions();
+                                    model.refresh_permissions_state();
+                                    model.shell.push_notification(if let Some(capability) = capability {
+                                        format!(
+                                            "Revoked {removed} permission grant(s) for {game_id}:{capability}"
+                                        )
+                                    } else {
+                                        format!(
+                                            "Revoked {removed} permission grant(s) for {game_id}"
+                                        )
+                                    });
+                                }
+                                ShellCommand::ResolvePermissionPrompt(action) => {
+                                    model.resolve_permission_prompt(action);
+                                }
                                 other => {
                                     if model.handle_shell_command(other) {
                                         should_quit = true;
@@ -1578,6 +2113,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     model.store.save_settings(&model.settings)?;
     model.store.save_play_history(&model.play_history)?;
     model.store.save_installed(&model.installed)?;
+    model.store.save_permissions(&model.permissions)?;
 
     let snapshot = model.diagnostics_snapshot();
     tracing::info!(
@@ -1599,13 +2135,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use content::ContentStore;
+    use plugin_host::{Capability, Decision, Scope};
     use shell::{Overlay, Route, ShellCommand};
 
     use super::{
-        ContentOperation, LaunchMode, RegistryCommand, compute_hotload_signature,
-        create_game_instance, execute_content_operation, execute_registry_command,
-        load_marketplace_catalog, parse_launch_mode, should_forward_key_to_runner,
-        should_render_frame,
+        ContentOperation, LaunchMode, PermissionsCommand, RegistryCommand,
+        compute_hotload_signature, create_game_instance, execute_content_operation,
+        execute_permissions_command, execute_registry_command, load_marketplace_catalog,
+        parse_launch_mode, should_forward_key_to_runner, should_render_frame,
     };
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
@@ -1772,6 +2309,36 @@ mod tests {
             mode,
             LaunchMode::Registry(RegistryCommand::Remove {
                 locator: "file:///tmp/index.json".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_permissions_list_launch_mode() {
+        let mode = parse_launch_mode(vec!["--permissions-list".to_string()])
+            .expect("permissions-list mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Permissions(PermissionsCommand::List { game_id: None })
+        );
+    }
+
+    #[test]
+    fn parses_permissions_revoke_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--permissions-revoke".to_string(),
+            "remote-wasm".to_string(),
+            "--capability".to_string(),
+            "net".to_string(),
+        ])
+        .expect("permissions-revoke mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Permissions(PermissionsCommand::Revoke {
+                game_id: "remote-wasm".to_string(),
+                capability: Some("net".to_string()),
             })
         );
     }
@@ -2024,6 +2591,61 @@ mod tests {
             listed.registry_locators,
             vec!["file:///tmp/first.json", "file:///tmp/second.json"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn permissions_list_is_stable_and_ordered() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let store = content::JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        let mut permissions = store.load_permissions()?;
+        permissions.grants.insert(
+            "game-b".to_string(),
+            vec![content::PermissionGrant {
+                capability: Capability::Net,
+                scope: Scope::Prompt,
+                decision: Decision::Deny,
+                remembered: true,
+                granted_at: chrono::Utc::now(),
+            }],
+        );
+        permissions.grants.insert(
+            "game-a".to_string(),
+            vec![content::PermissionGrant {
+                capability: Capability::Clock,
+                scope: Scope::None,
+                decision: Decision::Allow,
+                remembered: true,
+                granted_at: chrono::Utc::now(),
+            }],
+        );
+        store.save_permissions(&permissions)?;
+
+        let report = execute_permissions_command(root, PermissionsCommand::List { game_id: None })?;
+        assert!(report.success);
+        assert_eq!(report.grants.len(), 2);
+        assert!(report.grants[0].starts_with("game-a|"));
+        assert!(report.grants[1].starts_with("game-b|"));
+        Ok(())
+    }
+
+    #[test]
+    fn permissions_revoke_missing_is_failure() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let report = execute_permissions_command(
+            root,
+            PermissionsCommand::Revoke {
+                game_id: "ghost".to_string(),
+                capability: Some("net".to_string()),
+            },
+        )?;
+        assert!(!report.success);
+        assert_eq!(report.message, "no grants found for ghost:net");
         Ok(())
     }
 
