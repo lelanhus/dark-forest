@@ -21,10 +21,12 @@ registry = { path = "../registry" }
 runtime = { path = "../runtime" }
 shell = { path = "../shell" }
 theme = { path = "../theme" }
+plugin-host = { path = "../plugin-host" }
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3.17"
+wat = "1.0"
 
 [lints]
 workspace = true
