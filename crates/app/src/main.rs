@@ -89,6 +89,8 @@ enum CreatorCommand {
         artifact_path: PathBuf,
         metadata_path: Option<PathBuf>,
         index_locator: String,
+        dry_run: bool,
+        replace_existing: bool,
     },
 }
 
@@ -198,6 +200,8 @@ impl CreatorCommandReport {
             index_path: None,
             created_game: None,
             created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
         }
     }
 
@@ -215,14 +219,21 @@ impl CreatorCommandReport {
             index_path: None,
             created_game: None,
             created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
         }
     }
 
     fn success_publish(outcome: creator::PublishOutcome) -> Self {
+        let message = if outcome.dry_run {
+            format!("publish dry-run {}@{}", outcome.game_id, outcome.version)
+        } else {
+            format!("published {}@{}", outcome.game_id, outcome.version)
+        };
         Self {
             command: "publish".to_string(),
             success: true,
-            message: format!("published {}@{}", outcome.game_id, outcome.version),
+            message,
             artifact_path: Some(outcome.artifact_path),
             metadata_path: None,
             game_id: Some(outcome.game_id),
@@ -232,6 +243,8 @@ impl CreatorCommandReport {
             index_path: Some(outcome.index_path),
             created_game: Some(outcome.created_game),
             created_version: Some(outcome.created_version),
+            replaced_existing_version: Some(outcome.replaced_existing_version),
+            dry_run: Some(outcome.dry_run),
         }
     }
 
@@ -249,6 +262,8 @@ impl CreatorCommandReport {
             index_path: None,
             created_game: None,
             created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
         }
     }
 }
@@ -283,6 +298,8 @@ struct CreatorCommandReport {
     index_path: Option<PathBuf>,
     created_game: Option<bool>,
     created_version: Option<bool>,
+    replaced_existing_version: Option<bool>,
+    dry_run: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -447,7 +464,7 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 "  dark-forest --verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]"
             );
             println!(
-                "  dark-forest --publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]"
+                "  dark-forest --publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]"
             );
             std::process::exit(0);
         }
@@ -683,12 +700,14 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
         "--publish" => {
             if args.len() < 2 {
                 return Err(anyhow!(
-                    "--publish requires <artifact.tar.gz> --index <locator> [--metadata <metadata.json>]"
+                    "--publish requires <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]"
                 ));
             }
 
             let mut metadata_path = None;
             let mut index_locator = None;
+            let mut dry_run = false;
+            let mut replace_existing = false;
             let mut idx = 2;
             while idx < args.len() {
                 match args[idx].as_str() {
@@ -706,6 +725,14 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                         index_locator = Some(args[idx + 1].clone());
                         idx += 2;
                     }
+                    "--dry-run" => {
+                        dry_run = true;
+                        idx += 1;
+                    }
+                    "--replace" => {
+                        replace_existing = true;
+                        idx += 1;
+                    }
                     other => {
                         return Err(anyhow!("unknown argument for --publish: {other}"));
                     }
@@ -718,6 +745,8 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 artifact_path: PathBuf::from(&args[1]),
                 metadata_path,
                 index_locator,
+                dry_run,
+                replace_existing,
             }))
         }
         other => Err(anyhow!("unknown argument: {other}")),
@@ -783,11 +812,15 @@ fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandRepo
             artifact_path,
             metadata_path,
             index_locator,
+            dry_run,
+            replace_existing,
         } => {
             let outcome = publish_to_index(&PublishRequest {
                 artifact_path,
                 metadata_path,
                 index_locator,
+                dry_run,
+                replace_existing,
             })?;
             Ok(CreatorCommandReport::success_publish(outcome))
         }
@@ -827,6 +860,12 @@ fn run_creator_cli(command: CreatorCommand) -> Result<()> {
     }
     if let Some(created_version) = report.created_version {
         println!("publish.created_version={created_version}");
+    }
+    if let Some(replaced) = report.replaced_existing_version {
+        println!("publish.replaced_existing_version={replaced}");
+    }
+    if let Some(dry_run) = report.dry_run {
+        println!("publish.dry_run={dry_run}");
     }
 
     if report.success {
@@ -2724,6 +2763,32 @@ mod tests {
                 artifact_path: PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz"),
                 metadata_path: Some(PathBuf::from("/tmp/out/sample-game-1.2.3.metadata.json")),
                 index_locator: "file:///tmp/index.json".to_string(),
+                dry_run: false,
+                replace_existing: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_publish_launch_mode_with_dry_run_and_replace() {
+        let mode = parse_launch_mode(vec![
+            "--publish".to_string(),
+            "/tmp/out/sample-game-1.2.3.tar.gz".to_string(),
+            "--index".to_string(),
+            "file:///tmp/index.json".to_string(),
+            "--dry-run".to_string(),
+            "--replace".to_string(),
+        ])
+        .expect("publish mode with flags should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Publish {
+                artifact_path: PathBuf::from("/tmp/out/sample-game-1.2.3.tar.gz"),
+                metadata_path: None,
+                index_locator: "file:///tmp/index.json".to_string(),
+                dry_run: true,
+                replace_existing: true,
             })
         );
     }

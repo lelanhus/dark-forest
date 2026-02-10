@@ -48,6 +48,8 @@ pub struct PublishRequest {
     pub artifact_path: PathBuf,
     pub metadata_path: Option<PathBuf>,
     pub index_locator: String,
+    pub dry_run: bool,
+    pub replace_existing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct PublishOutcome {
     pub artifact_path: PathBuf,
     pub created_game: bool,
     pub created_version: bool,
+    pub replaced_existing_version: bool,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,12 +258,14 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    fs::create_dir_all(&index_dir).with_context(|| {
-        format!(
-            "failed to ensure index directory exists {}",
-            index_dir.display()
-        )
-    })?;
+    if !request.dry_run {
+        fs::create_dir_all(&index_dir).with_context(|| {
+            format!(
+                "failed to ensure index directory exists {}",
+                index_dir.display()
+            )
+        })?;
+    }
 
     let artifact_file_name = request
         .artifact_path
@@ -272,16 +278,19 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             )
         })?;
     let published_artifact_path = index_dir.join(&artifact_file_name);
-    stage_published_artifact(
-        &request.artifact_path,
-        &published_artifact_path,
-        &verify_outcome.artifact_sha256,
-    )?;
+    if !request.dry_run {
+        stage_published_artifact(
+            &request.artifact_path,
+            &published_artifact_path,
+            &verify_outcome.artifact_sha256,
+            request.replace_existing,
+        )?;
+    }
 
     let mut catalog = load_index_catalog(&index_path)?;
     let temp = tempfile::tempdir().context("failed to create temporary publish directory")?;
-    unpack_tarball_to_dir(&published_artifact_path, temp.path())
-        .with_context(|| format!("failed to unpack {}", published_artifact_path.display()))?;
+    unpack_tarball_to_dir(&request.artifact_path, temp.path())
+        .with_context(|| format!("failed to unpack {}", request.artifact_path.display()))?;
     let manifest = load_manifest(temp.path())?;
 
     let summary = summarize_permissions(&manifest.permissions);
@@ -301,6 +310,7 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
 
     let mut created_game = false;
     let mut created_version = false;
+    let mut replaced_existing_version = false;
 
     if let Some(existing) = catalog.games.iter_mut().find(|item| item.id == manifest.id) {
         if let Some(existing_version) = existing
@@ -311,6 +321,9 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             if existing_version.checksum_sha256.as_deref() == Some(&verify_outcome.artifact_sha256)
             {
                 // idempotent publish for identical artifact/version
+            } else if request.replace_existing {
+                *existing_version = version_entry.clone();
+                replaced_existing_version = true;
             } else {
                 return Err(anyhow!(
                     "version already exists with different checksum: {}@{}",
@@ -344,7 +357,9 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
     }
 
     sort_catalog(&mut catalog);
-    atomic_write_json(&index_path, &catalog)?;
+    if !request.dry_run {
+        atomic_write_json(&index_path, &catalog)?;
+    }
 
     Ok(PublishOutcome {
         index_path,
@@ -353,6 +368,8 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         artifact_path: published_artifact_path,
         created_game,
         created_version,
+        replaced_existing_version,
+        dry_run: request.dry_run,
     })
 }
 
@@ -524,6 +541,7 @@ fn stage_published_artifact(
     source: &Path,
     destination: &Path,
     expected_sha256: &str,
+    replace_existing: bool,
 ) -> Result<()> {
     if source == destination {
         return Ok(());
@@ -540,10 +558,12 @@ fn stage_published_artifact(
         if existing_sha.eq_ignore_ascii_case(expected_sha256) {
             return Ok(());
         }
-        return Err(anyhow!(
-            "published artifact conflict at {}",
-            destination.display()
-        ));
+        if !replace_existing {
+            return Err(anyhow!(
+                "published artifact conflict at {}",
+                destination.display()
+            ));
+        }
     }
 
     let bytes = fs::read(source)
@@ -749,6 +769,11 @@ mod tests {
         Ok(())
     }
 
+    fn write_wasm_payload(game_dir: &Path, payload: &[u8]) -> Result<()> {
+        fs::write(game_dir.join("main.wasm"), payload)?;
+        Ok(())
+    }
+
     #[test]
     fn pack_creates_tarball_and_metadata_with_expected_fields() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -938,12 +963,16 @@ mod tests {
             artifact_path: artifact_path.clone(),
             metadata_path: Some(metadata_path),
             index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
         })?;
 
         assert_eq!(outcome.game_id, "sample-game");
         assert_eq!(outcome.version, "1.2.3");
         assert!(outcome.created_game);
         assert!(outcome.created_version);
+        assert!(!outcome.replaced_existing_version);
+        assert!(!outcome.dry_run);
         assert!(index_path.exists());
         assert!(outcome.artifact_path.exists());
 
@@ -975,6 +1004,8 @@ mod tests {
             artifact_path: artifact_v1,
             metadata_path: Some(metadata_v1),
             index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
         })?;
 
         write_manifest_version(&game_dir, "sample-game", "1.2.4")?;
@@ -992,10 +1023,14 @@ mod tests {
             artifact_path: artifact_v2,
             metadata_path: Some(metadata_v2),
             index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
         })?;
 
         assert!(!publish_v2.created_game);
         assert!(publish_v2.created_version);
+        assert!(!publish_v2.replaced_existing_version);
+        assert!(!publish_v2.dry_run);
         assert_eq!(publish_v2.version, "1.2.4");
         assert_eq!(pack_v2.metadata.version, "1.2.4");
 
@@ -1037,8 +1072,111 @@ mod tests {
             artifact_path,
             metadata_path: Some(metadata_path),
             index_locator: "https://example.com/index.json".to_string(),
+            dry_run: false,
+            replace_existing: false,
         });
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn publish_dry_run_does_not_write_index_or_artifact() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let artifact_path = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+
+        let index_path = temp.path().join("registry").join("index.json");
+        let outcome = publish_to_index(&PublishRequest {
+            artifact_path,
+            metadata_path: Some(metadata_path),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: true,
+            replace_existing: false,
+        })?;
+
+        assert!(outcome.dry_run);
+        assert!(!index_path.exists());
+        assert!(!outcome.artifact_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn publish_replace_overwrites_existing_version_checksum() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let index_path = temp.path().join("registry").join("index.json");
+
+        let artifact_v1 = temp.path().join("dist").join("sample-game-1.2.3.tar.gz");
+        let metadata_v1 = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3.metadata.json");
+        let pack_v1 = pack_game(&PackRequest {
+            game_dir: game_dir.clone(),
+            out: Some(artifact_v1.clone()),
+            metadata_out: Some(metadata_v1.clone()),
+        })?;
+        publish_to_index(&PublishRequest {
+            artifact_path: artifact_v1,
+            metadata_path: Some(metadata_v1),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
+        })?;
+
+        write_wasm_payload(&game_dir, b"updated wasm payload")?;
+        let artifact_v2 = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3-replace.tar.gz");
+        let metadata_v2 = temp
+            .path()
+            .join("dist")
+            .join("sample-game-1.2.3-replace.metadata.json");
+        let pack_v2 = pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_v2.clone()),
+            metadata_out: Some(metadata_v2.clone()),
+        })?;
+
+        let conflict = publish_to_index(&PublishRequest {
+            artifact_path: artifact_v2.clone(),
+            metadata_path: Some(metadata_v2.clone()),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: false,
+        });
+        assert!(conflict.is_err());
+
+        let replaced = publish_to_index(&PublishRequest {
+            artifact_path: artifact_v2,
+            metadata_path: Some(metadata_v2),
+            index_locator: index_path.to_string_lossy().to_string(),
+            dry_run: false,
+            replace_existing: true,
+        })?;
+        assert!(!replaced.created_game);
+        assert!(!replaced.created_version);
+        assert!(replaced.replaced_existing_version);
+        assert!(!replaced.dry_run);
+
+        let index_raw = fs::read_to_string(&index_path)?;
+        let index_json: Value = serde_json::from_str(&index_raw)?;
+        let checksum = index_json["games"][0]["versions"][0]["checksum_sha256"]
+            .as_str()
+            .expect("checksum must be present");
+        assert_ne!(checksum, pack_v1.metadata.artifact_sha256);
+        assert_eq!(checksum, pack_v2.metadata.artifact_sha256);
         Ok(())
     }
 }
