@@ -19,6 +19,7 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, terminal};
 use diagnostics::{DiagnosticsSnapshot, PerfDiagnostics, detect_terminal_capabilities};
 use games::builtin_catalog;
+use plugin_host::{PluginManifest, WasmGameAdapter, validate_entry_type};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{
@@ -519,6 +520,75 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
     }
 }
 
+fn source_scheme_from_source(source: &str) -> &str {
+    source
+        .split_once("://")
+        .map(|(scheme, _rest)| scheme)
+        .unwrap_or(source)
+}
+
+fn to_plugin_manifest(manifest: registry::Manifest) -> PluginManifest {
+    PluginManifest {
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        author: manifest.author,
+        entry_type: manifest.entry_type,
+        entry: manifest.entry,
+        host_api: manifest.host_api,
+        permissions: manifest.permissions,
+    }
+}
+
+fn create_game_instance(
+    root: &Path,
+    installed: &content::InstalledFile,
+    game_id: &str,
+    seed: u64,
+) -> Result<Box<dyn runtime::Game + Send>> {
+    if let Some(record) = installed.installed.iter().find(|item| item.id == game_id) {
+        if record.source.starts_with("builtin://") {
+            return games::instantiate(game_id, seed);
+        }
+
+        let source_scheme = source_scheme_from_source(&record.source);
+        let artifact_dir = root
+            .join("games")
+            .join(game_id)
+            .join(record.current_version.as_str());
+        let manifest_path = artifact_dir.join("game.json");
+        let raw_manifest = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let parsed = parse_manifest(&raw_manifest)
+            .with_context(|| format!("invalid manifest at {}", manifest_path.display()))?;
+        if parsed.id != game_id {
+            return Err(anyhow!(
+                "manifest id mismatch for {}: expected {}, found {}",
+                manifest_path.display(),
+                game_id,
+                parsed.id
+            ));
+        }
+
+        validate_entry_type(parsed.entry_type, source_scheme, source_scheme == "builtin")?;
+
+        return match parsed.entry_type {
+            plugin_host::EntryType::Wasm => {
+                let game = WasmGameAdapter::new(to_plugin_manifest(parsed), artifact_dir)?;
+                Ok(Box::new(game))
+            }
+            plugin_host::EntryType::Native => Err(anyhow!(
+                "third-party native entry_type is not allowed by default policy"
+            )),
+            plugin_host::EntryType::Process => {
+                Err(anyhow!("process entry_type is disabled by default"))
+            }
+        };
+    }
+
+    games::instantiate(game_id, seed)
+}
+
 fn load_marketplace_catalog(
     settings: &content::Settings,
     cache_root: PathBuf,
@@ -969,7 +1039,7 @@ impl AppModel {
 
     fn start_game(&mut self, game_id: &str) {
         let seed = self.next_seed();
-        match games::instantiate(game_id, seed) {
+        match create_game_instance(self.store.root(), &self.installed, game_id, seed) {
             Ok(game) => {
                 if let Err(err) = self.runner.start(game, seed) {
                     self.shell.set_error(format!("failed to start game: {err}"));
@@ -985,9 +1055,9 @@ impl AppModel {
                     .unwrap_or_else(Instant::now);
                 self.shell.push_notification(format!("Started {game_id}"));
             }
-            Err(err) => self.shell.set_error(format!(
-                "unable to start game ({game_id}): {err}. Third-party execution is not enabled yet"
-            )),
+            Err(err) => self
+                .shell
+                .set_error(format!("unable to start game ({game_id}): {err}")),
         }
     }
 
@@ -1533,9 +1603,56 @@ mod tests {
 
     use super::{
         ContentOperation, LaunchMode, RegistryCommand, compute_hotload_signature,
-        execute_content_operation, execute_registry_command, load_marketplace_catalog,
-        parse_launch_mode, should_forward_key_to_runner, should_render_frame,
+        create_game_instance, execute_content_operation, execute_registry_command,
+        load_marketplace_catalog, parse_launch_mode, should_forward_key_to_runner,
+        should_render_frame,
     };
+
+    fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
+        let wat = r#"
+            (module
+              (global $ticks (mut i32) (i32.const 0))
+              (func (export "df_init") (param i32 i32 i64) (result i32)
+                (i32.const 0)
+              )
+              (func (export "df_update") (param i32 i32 i32) (result i32)
+                (local.get 0)
+                (i32.const 0)
+                (i32.eq)
+                (if
+                  (then
+                    (global.get $ticks)
+                    (i32.const 1)
+                    (i32.add)
+                    (global.set $ticks)
+                  )
+                )
+                (i32.const 0)
+              )
+              (func (export "df_cell") (param i32 i32) (result i32)
+                (local.get 0)
+                (i32.const 0)
+                (i32.eq)
+                (local.get 1)
+                (i32.const 0)
+                (i32.eq)
+                (i32.and)
+                (if (result i32)
+                  (then (i32.const 87))
+                  (else (i32.const 32))
+                )
+              )
+              (func (export "df_score") (result i64)
+                (global.get $ticks)
+                (i64.extend_i32_s)
+              )
+            )
+        "#;
+
+        let bytes = wat::parse_str(wat)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
 
     #[test]
     fn render_scheduler_waits_until_target_duration() {
@@ -2036,6 +2153,113 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("duplicate marketplace id")),
             "expected duplicate warning"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn launch_resolver_starts_installed_wasm_game() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let store = content::JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        let game_id = "remote-wasm";
+        let version = "1.0.0";
+        let game_root = root.join("games").join(game_id).join(version);
+        std::fs::create_dir_all(&game_root)?;
+        std::fs::write(
+            game_root.join("game.json"),
+            serde_json::json!({
+                "id": game_id,
+                "name": "Remote WASM",
+                "version": version,
+                "author": "Remote Team",
+                "entry_type": "wasm",
+                "entry": "main.wasm",
+                "host_api": "^0.1",
+                "permissions": ["terminal.raw_input"]
+            })
+            .to_string(),
+        )?;
+        write_sample_wasm(&game_root.join("main.wasm"))?;
+
+        let installed = content::InstalledFile {
+            schema_version: content::CURRENT_SCHEMA_VERSION,
+            installed: vec![content::InstalledRecord {
+                id: game_id.to_string(),
+                source: "index://file:///tmp/index.json".to_string(),
+                current_version: version.to_string(),
+                installed_versions: vec![version.to_string()],
+                version_checksums: std::collections::BTreeMap::new(),
+            }],
+        };
+        store.save_installed(&installed)?;
+
+        let mut game = create_game_instance(&root, &installed, game_id, 42)?;
+        game.init(&runtime::InitCtx {
+            width: 20,
+            height: 8,
+            seed: 42,
+        })?;
+        let mut update = runtime::UpdateCtx::new(20, 8);
+        game.update(runtime::RuntimeEvent::Tick { dt_ms: 16 }, &mut update)?;
+
+        let mut frame = runtime::Frame::new(20, 8);
+        game.render(&mut frame);
+        assert_eq!(frame.get(0, 0).unwrap_or_default().glyph, 'W');
+        Ok(())
+    }
+
+    #[test]
+    fn launch_resolver_rejects_third_party_native_entry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let store = content::JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        let game_id = "remote-native";
+        let version = "1.0.0";
+        let game_root = root.join("games").join(game_id).join(version);
+        std::fs::create_dir_all(&game_root)?;
+        std::fs::write(
+            game_root.join("game.json"),
+            serde_json::json!({
+                "id": game_id,
+                "name": "Remote Native",
+                "version": version,
+                "author": "Remote Team",
+                "entry_type": "native",
+                "entry": "game.bin",
+                "host_api": "^0.1",
+                "permissions": ["terminal.raw_input"]
+            })
+            .to_string(),
+        )?;
+        std::fs::write(game_root.join("game.bin"), b"native")?;
+
+        let installed = content::InstalledFile {
+            schema_version: content::CURRENT_SCHEMA_VERSION,
+            installed: vec![content::InstalledRecord {
+                id: game_id.to_string(),
+                source: "index://file:///tmp/index.json".to_string(),
+                current_version: version.to_string(),
+                installed_versions: vec![version.to_string()],
+                version_checksums: std::collections::BTreeMap::new(),
+            }],
+        };
+        store.save_installed(&installed)?;
+
+        let err = match create_game_instance(&root, &installed, game_id, 42) {
+            Ok(_) => panic!("expected third-party native launch to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("third-party native entry_type is not allowed"),
+            "unexpected error: {err}"
         );
         Ok(())
     }
