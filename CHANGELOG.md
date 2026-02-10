@@ -8,31 +8,52 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
-- Content transaction support for local install, rollback, and verify operations.
+_None yet._
+
+## [1.0.0] - 2026-02-10
+
+### Added
+
+- Content transaction support for local install, rollback, verify, and remove operations.
 - Installed metadata schema expansion with version history and per-version checksums.
 - Permission grant persistence APIs (`load_permissions`/`save_permissions`) with typed capability grants.
-- `index://` registry provider with cached index fallback and artifact download support.
-- Tarball artifact unpack helper used by index installs.
-- CLI operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`, `--remove`.
-- CLI registry management modes: `--registry-list`, `--registry-add`, `--registry-remove`.
-- Shell Installed route action keybindings (`U` update, `B` rollback, `V` verify, `X` remove).
+- Settings-backed registry source configuration (`--registry-list`, `--registry-add`, `--registry-remove`).
+- `index://` registry provider with local file and HTTP(S) fetch support.
+- HTTP fetch retry/backoff with deterministic fallback-to-cache behavior for remote index catalogs.
+- Tarball artifact unpack helper for index installs plus checksum validation.
+- CLI content operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`, `--remove`.
+- Shell Installed action keybindings (`U` update, `B` rollback, `V` verify, `X` remove).
 - Shell Library/Game Detail install keybinding (`I`) for non-installed marketplace entries.
-- Polling hot-load detection for `installed.json` and `games/**/game.json`.
-- New ADR for content transactions and index provider architecture.
-- New ADR for registry settings and shell marketplace integration.
+- Asynchronous marketplace catalog refresh that merges remote entries into Library without blocking the UI loop.
+- Wasmtime-backed third-party `entry_type=wasm` runtime integration.
+- Manifest-driven launch resolver for installed entries with trust-policy enforcement.
+- Capability enforcement contracts and default policy at the host boundary for WASM guest requests.
+- Permission prompt flow (`Allow Once`, `Allow Always`, `Deny Once`, `Deny Always`) with remembered decisions.
+- Settings route permission audit/revoke actions and CLI parity:
+  - `--permissions-list [<game_id>]`
+  - `--permissions-revoke <game_id> [--capability <cap>]`
+- Install/update permission reconciliation that drops grants no longer declared by current manifest permissions.
+- Security prompt policy controls in settings (`security_toggles.prompt_sensitive_only`).
+- ADRs for:
+  - content transactions and index provider
+  - registry settings and shell marketplace integration
+  - WASM runtime and capability enforcement
+  - permission prompt/audit/revoke persistence semantics
 
 ### Changed
 
 - Manifest parsing now normalizes mixed legacy/typed permission declarations into typed grants.
 - Installed detail panel actions are now active commands rather than planned placeholders.
 - App runtime now executes content operations through a serialized background worker queue.
-- App interactive mode now refreshes configured marketplace registries asynchronously and merges
-  remote listings into Library.
+- App interactive mode refreshes configured marketplace registries asynchronously and merges remote listings into Library.
+- Third-party launch policy now allows `entry_type=wasm` and keeps third-party `native|process` disabled by default.
+- Permission decisions now flow through session plus persisted grant checks before default policy handling.
 - Remove operation revokes persisted permissions for the uninstalled game id.
 
 ### Fixed
 
 - Hot-load refresh and operation completion now synchronize Installed route state without requiring app restart.
+- Registry load failures surface as non-blocking warnings while continuing to load other configured registries.
 
 ## [0.1.0] - 2026-02-09
 
