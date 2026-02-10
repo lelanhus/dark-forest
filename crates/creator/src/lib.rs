@@ -14,6 +14,14 @@ use tar::{Builder, EntryType as TarEntryType, Header};
 
 pub const CREATOR_METADATA_SCHEMA_VERSION: u32 = 1;
 pub const CURRENT_HOST_API_VERSION: &str = "0.1.0";
+const WASM_BASIC_TEMPLATE_README: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/wasm-basic/README.md"
+));
+const WASM_BASIC_TEMPLATE_WASM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/wasm-basic/main.wasm"
+));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRequest {
@@ -81,6 +89,25 @@ pub struct DevCycleOutcome {
     pub pack: PackOutcome,
     pub verify: VerifyOutcome,
     pub publish: PublishOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateInitRequest {
+    pub game_dir: PathBuf,
+    pub game_id: Option<String>,
+    pub name: Option<String>,
+    pub author: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateInitOutcome {
+    pub game_dir: PathBuf,
+    pub manifest_path: PathBuf,
+    pub entry_path: PathBuf,
+    pub readme_path: PathBuf,
+    pub game_id: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -418,6 +445,67 @@ pub fn run_dev_cycle(request: &DevRequest) -> Result<DevCycleOutcome> {
     })
 }
 
+pub fn init_wasm_template(request: &TemplateInitRequest) -> Result<TemplateInitOutcome> {
+    ensure_directory_ready(&request.game_dir)?;
+
+    let game_id = request
+        .game_id
+        .clone()
+        .unwrap_or_else(|| derive_default_game_id(&request.game_dir));
+    validate_game_id(&game_id)?;
+
+    let name = request
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| derive_default_name(&request.game_dir));
+    let author = request
+        .author
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Unknown Author".to_string());
+    let requested_version = request
+        .version
+        .clone()
+        .unwrap_or_else(|| "0.1.0".to_string());
+    let version = Version::parse(&requested_version)
+        .with_context(|| format!("template version must be valid semver: {requested_version}"))?
+        .to_string();
+
+    let manifest_path = request.game_dir.join("game.json");
+    let entry_path = request.game_dir.join("main.wasm");
+    let readme_path = request.game_dir.join("README.md");
+    let manifest = serde_json::json!({
+        "id": game_id,
+        "name": name,
+        "version": version,
+        "author": author,
+        "entry_type": "wasm",
+        "entry": "main.wasm",
+        "host_api": "^0.1",
+        "permissions": []
+    });
+
+    atomic_write_json(&manifest_path, &manifest)?;
+    atomic_write_bytes(&entry_path, WASM_BASIC_TEMPLATE_WASM)?;
+    atomic_write_bytes(&readme_path, WASM_BASIC_TEMPLATE_README.as_bytes())?;
+
+    Ok(TemplateInitOutcome {
+        game_dir: request.game_dir.clone(),
+        manifest_path,
+        entry_path,
+        readme_path,
+        game_id: manifest["id"]
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("generated manifest id is invalid"))?,
+        version: manifest["version"]
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("generated manifest version is invalid"))?,
+    })
+}
+
 pub fn game_dir_signature(game_dir: &Path) -> Result<String> {
     if !game_dir.exists() || !game_dir.is_dir() {
         return Err(anyhow!("game directory is invalid: {}", game_dir.display()));
@@ -464,6 +552,91 @@ pub fn default_metadata_path(artifact_path: &Path) -> Result<PathBuf> {
     };
     let metadata_name = format!("{stem}.metadata.json");
     Ok(artifact_path.with_file_name(metadata_name))
+}
+
+fn ensure_directory_ready(path: &Path) -> Result<()> {
+    if path.exists() {
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("failed to inspect template directory {}", path.display()))?;
+        if !metadata.is_dir() {
+            return Err(anyhow!(
+                "template target path is not a directory: {}",
+                path.display()
+            ));
+        }
+        let mut entries = fs::read_dir(path)
+            .with_context(|| format!("failed to read template directory {}", path.display()))?;
+        if entries.next().transpose()?.is_some() {
+            return Err(anyhow!(
+                "template target directory must be empty: {}",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create template directory {}", path.display()))
+}
+
+fn derive_default_game_id(game_dir: &Path) -> String {
+    let raw = game_dir
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "example-wasm-game".to_string());
+    let mut normalized = String::with_capacity(raw.len());
+    let mut previous_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            previous_dash = false;
+            continue;
+        }
+        if matches!(ch, '.' | '_' | '-') {
+            normalized.push(ch);
+            previous_dash = ch == '-';
+            continue;
+        }
+        if !previous_dash {
+            normalized.push('-');
+            previous_dash = true;
+        }
+    }
+
+    let trimmed = normalized
+        .trim_matches('-')
+        .trim_matches('.')
+        .trim_matches('_')
+        .to_string();
+    if trimmed.is_empty() {
+        "example-wasm-game".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn derive_default_name(game_dir: &Path) -> String {
+    game_dir
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Example WASM Game".to_string())
+}
+
+fn validate_game_id(game_id: &str) -> Result<()> {
+    if game_id.trim().is_empty() {
+        return Err(anyhow!("game id must not be empty"));
+    }
+    if !game_id
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(anyhow!(
+            "game id must match [a-z0-9._-]+ (received {game_id})"
+        ));
+    }
+    Ok(())
 }
 
 fn load_manifest(game_dir: &Path) -> Result<registry::Manifest> {
@@ -815,9 +988,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DevRequest, PackRequest, PublishRequest, VerifyRequest, default_artifact_path,
-        default_metadata_path, game_dir_signature, pack_game, publish_to_index, run_dev_cycle,
-        verify_artifact,
+        DevRequest, PackRequest, PublishRequest, TemplateInitRequest, VerifyRequest,
+        default_artifact_path, default_metadata_path, game_dir_signature, init_wasm_template,
+        pack_game, publish_to_index, run_dev_cycle, verify_artifact,
     };
 
     static TEST_CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -928,6 +1101,108 @@ mod tests {
 
     fn write_wasm_payload(game_dir: &Path, payload: &[u8]) -> Result<()> {
         fs::write(game_dir.join("main.wasm"), payload)?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_wasm_template_creates_manifest_and_entry() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("space-blaster");
+
+        let outcome = init_wasm_template(&TemplateInitRequest {
+            game_dir: game_dir.clone(),
+            game_id: Some("space-blaster".to_string()),
+            name: Some("Space Blaster".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.4.2".to_string()),
+        })?;
+
+        assert_eq!(outcome.game_dir, game_dir);
+        assert!(outcome.manifest_path.exists());
+        assert!(outcome.entry_path.exists());
+        assert!(outcome.readme_path.exists());
+        assert_eq!(outcome.game_id, "space-blaster");
+        assert_eq!(outcome.version, "0.4.2");
+
+        let manifest: Value = serde_json::from_slice(&fs::read(&outcome.manifest_path)?)?;
+        assert_eq!(manifest["id"], "space-blaster");
+        assert_eq!(manifest["name"], "Space Blaster");
+        assert_eq!(manifest["version"], "0.4.2");
+        assert_eq!(manifest["author"], "Dark Forest");
+        assert_eq!(manifest["entry_type"], "wasm");
+        assert_eq!(manifest["entry"], "main.wasm");
+        assert_eq!(manifest["host_api"], "^0.1");
+        assert_eq!(manifest["permissions"], serde_json::json!([]));
+        Ok(())
+    }
+
+    #[test]
+    fn init_wasm_template_rejects_nonempty_directory() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("existing");
+        fs::create_dir_all(&game_dir)?;
+        fs::write(game_dir.join("already.txt"), b"occupied")?;
+
+        let result = init_wasm_template(&TemplateInitRequest {
+            game_dir,
+            game_id: Some("existing".to_string()),
+            name: Some("Existing".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.1.0".to_string()),
+        });
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn init_wasm_template_derives_defaults_from_directory_name() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("My Cool Game");
+
+        let outcome = init_wasm_template(&TemplateInitRequest {
+            game_dir: game_dir.clone(),
+            game_id: None,
+            name: None,
+            author: Some("Dark Forest".to_string()),
+            version: None,
+        })?;
+
+        assert_eq!(outcome.game_id, "my-cool-game");
+        assert_eq!(outcome.version, "0.1.0");
+        let manifest: Value = serde_json::from_slice(&fs::read(game_dir.join("game.json"))?)?;
+        assert_eq!(manifest["id"], "my-cool-game");
+        assert_eq!(manifest["name"], "My Cool Game");
+        assert_eq!(manifest["version"], "0.1.0");
+        Ok(())
+    }
+
+    #[test]
+    fn init_wasm_template_rejects_invalid_game_id() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("my-game");
+        let result = init_wasm_template(&TemplateInitRequest {
+            game_dir,
+            game_id: Some("Invalid Game Id".to_string()),
+            name: Some("My Game".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.1.0".to_string()),
+        });
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn init_wasm_template_rejects_invalid_version() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("my-game");
+        let result = init_wasm_template(&TemplateInitRequest {
+            game_dir,
+            game_id: Some("my-game".to_string()),
+            name: Some("My Game".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("invalid".to_string()),
+        });
+        assert!(result.is_err());
         Ok(())
     }
 

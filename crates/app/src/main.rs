@@ -13,8 +13,9 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
 use creator::{
-    DevRequest, PackRequest, PublishRequest, VerifyRequest, game_dir_signature, pack_game,
-    publish_to_index, run_dev_cycle, verify_artifact,
+    DevRequest, PackRequest, PublishRequest, TemplateInitRequest, VerifyRequest,
+    game_dir_signature, init_wasm_template, pack_game, publish_to_index, run_dev_cycle,
+    verify_artifact,
 };
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use crossterm::terminal::{
@@ -77,6 +78,13 @@ enum PermissionsCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CreatorCommand {
+    InitTemplate {
+        game_dir: PathBuf,
+        game_id: Option<String>,
+        name: Option<String>,
+        author: Option<String>,
+        version: Option<String>,
+    },
     Pack {
         game_dir: PathBuf,
         out: Option<PathBuf>,
@@ -158,6 +166,7 @@ impl ContentOperation {
 impl CreatorCommand {
     fn label(&self) -> &'static str {
         match self {
+            Self::InitTemplate { .. } => "init-template",
             Self::Pack { .. } => "pack",
             Self::VerifyArtifact { .. } => "verify-artifact",
             Self::Publish { .. } => "publish",
@@ -195,6 +204,31 @@ impl OperationReport {
 }
 
 impl CreatorCommandReport {
+    fn success_init_template(outcome: creator::TemplateInitOutcome) -> Self {
+        Self {
+            command: "init-template".to_string(),
+            success: true,
+            message: format!("initialized template {}", outcome.game_id),
+            artifact_path: None,
+            metadata_path: None,
+            game_id: Some(outcome.game_id),
+            version: Some(outcome.version),
+            artifact_sha256: None,
+            artifact_size_bytes: None,
+            index_path: None,
+            created_game: None,
+            created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
+            template_game_dir: Some(outcome.game_dir),
+            template_manifest_path: Some(outcome.manifest_path),
+            template_entry_path: Some(outcome.entry_path),
+            template_readme_path: Some(outcome.readme_path),
+        }
+    }
+
     fn success_pack(outcome: creator::PackOutcome) -> Self {
         Self {
             command: "pack".to_string(),
@@ -216,6 +250,10 @@ impl CreatorCommandReport {
             dry_run: None,
             watch_mode: None,
             dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
         }
     }
 
@@ -237,6 +275,10 @@ impl CreatorCommandReport {
             dry_run: None,
             watch_mode: None,
             dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
         }
     }
 
@@ -263,6 +305,10 @@ impl CreatorCommandReport {
             dry_run: Some(outcome.dry_run),
             watch_mode: None,
             dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
         }
     }
 
@@ -295,6 +341,10 @@ impl CreatorCommandReport {
             dry_run: Some(outcome.publish.dry_run),
             watch_mode: Some(watch_mode),
             dev_cycles: Some(dev_cycles),
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
         }
     }
 
@@ -316,6 +366,10 @@ impl CreatorCommandReport {
             dry_run: None,
             watch_mode: None,
             dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
         }
     }
 }
@@ -354,6 +408,10 @@ struct CreatorCommandReport {
     dry_run: Option<bool>,
     watch_mode: Option<bool>,
     dev_cycles: Option<u64>,
+    template_game_dir: Option<PathBuf>,
+    template_manifest_path: Option<PathBuf>,
+    template_entry_path: Option<PathBuf>,
+    template_readme_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -511,6 +569,9 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --registry-remove <locator>");
             println!("  dark-forest --permissions-list [<game_id>]");
             println!("  dark-forest --permissions-revoke <game_id> [--capability <cap>]");
+            println!(
+                "  dark-forest --init-template <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]"
+            );
             println!(
                 "  dark-forest --pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]"
             );
@@ -685,6 +746,62 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             Ok(LaunchMode::Permissions(PermissionsCommand::Revoke {
                 game_id,
                 capability,
+            }))
+        }
+        "--init-template" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--init-template requires <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]"
+                ));
+            }
+
+            let mut game_id = None;
+            let mut name = None;
+            let mut author = None;
+            let mut version = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--id" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--id requires a value"));
+                        }
+                        game_id = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--name" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--name requires a value"));
+                        }
+                        name = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--author" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--author requires a value"));
+                        }
+                        author = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--version" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--version requires a value"));
+                        }
+                        version = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --init-template: {other}"));
+                    }
+                }
+            }
+
+            Ok(LaunchMode::Creator(CreatorCommand::InitTemplate {
+                game_dir: PathBuf::from(&args[1]),
+                game_id,
+                name,
+                author,
+                version,
             }))
         }
         "--pack" => {
@@ -924,6 +1041,22 @@ fn run_operation_cli(operation: ContentOperation) -> Result<()> {
 
 fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandReport> {
     match command {
+        CreatorCommand::InitTemplate {
+            game_dir,
+            game_id,
+            name,
+            author,
+            version,
+        } => {
+            let outcome = init_wasm_template(&TemplateInitRequest {
+                game_dir,
+                game_id,
+                name,
+                author,
+                version,
+            })?;
+            Ok(CreatorCommandReport::success_init_template(outcome))
+        }
         CreatorCommand::Pack {
             game_dir,
             out,
@@ -1089,6 +1222,18 @@ fn print_creator_report(report: &CreatorCommandReport) {
     }
     if let Some(cycles) = report.dev_cycles {
         println!("dev.cycles={cycles}");
+    }
+    if let Some(path) = &report.template_game_dir {
+        println!("template.game_dir={}", path.display());
+    }
+    if let Some(path) = &report.template_manifest_path {
+        println!("template.manifest_path={}", path.display());
+    }
+    if let Some(path) = &report.template_entry_path {
+        println!("template.entry_path={}", path.display());
+    }
+    if let Some(path) = &report.template_readme_path {
+        println!("template.readme_path={}", path.display());
     }
 }
 
@@ -3070,6 +3215,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_init_template_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--init-template".to_string(),
+            "/tmp/my-game".to_string(),
+            "--id".to_string(),
+            "my-game".to_string(),
+            "--name".to_string(),
+            "My Game".to_string(),
+            "--author".to_string(),
+            "Dark Forest".to_string(),
+            "--version".to_string(),
+            "0.3.0".to_string(),
+        ])
+        .expect("init-template mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::InitTemplate {
+                game_dir: PathBuf::from("/tmp/my-game"),
+                game_id: Some("my-game".to_string()),
+                name: Some("My Game".to_string()),
+                author: Some("Dark Forest".to_string()),
+                version: Some("0.3.0".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn pack_launch_mode_requires_game_dir() {
         let err = parse_launch_mode(vec!["--pack".to_string()]);
         assert!(err.is_err());
@@ -3161,6 +3334,32 @@ mod tests {
             "--index".to_string(),
             "file:///tmp/index.json".to_string(),
             "--nope".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn init_template_launch_mode_requires_game_dir() {
+        let err = parse_launch_mode(vec!["--init-template".to_string()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn init_template_launch_mode_rejects_unknown_argument() {
+        let err = parse_launch_mode(vec![
+            "--init-template".to_string(),
+            "/tmp/my-game".to_string(),
+            "--unknown".to_string(),
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn init_template_launch_mode_rejects_missing_option_value() {
+        let err = parse_launch_mode(vec![
+            "--init-template".to_string(),
+            "/tmp/my-game".to_string(),
+            "--id".to_string(),
         ]);
         assert!(err.is_err());
     }

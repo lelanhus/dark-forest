@@ -23,6 +23,7 @@ registry/runtime code paths that solve different problems.
 
 1. Introduce `crates/creator` as the owner of creator-packaging/verification APIs.
 2. Add CLI entrypoints in `crates/app`:
+   - `--init-template <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]`
    - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
    - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
    - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
