@@ -47,10 +47,12 @@ Publication step runs only for tag refs.
 
 1. Milestone exit criteria met (`ROADMAP.md`).
 2. Required local quality gates green:
+   - `make ci`
    - `cargo fmt --all -- --check`
    - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
    - `cargo test --workspace --all-targets --all-features`
    - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
+   - `cargo deny check advisories licenses bans sources`
 3. Security-impact changes reviewed.
 4. Changelog updated (`CHANGELOG.md`).
 5. ADRs updated for key architecture/security/perf decisions.

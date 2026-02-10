@@ -106,10 +106,12 @@ Tag-driven release builds publish:
 Required local quality gates:
 
 ```bash
+make ci
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo deny check advisories licenses bans sources
 ```
 
 Additional policy and standards docs:
