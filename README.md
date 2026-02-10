@@ -37,8 +37,8 @@ Implemented post-`v0.1.0` (current workspace):
 - Permission prompt flow (`Allow Once`, `Allow Always`, `Deny Once`, `Deny Always`) with remembered decisions.
 - Permission audit/revoke in Settings and CLI parity (`--permissions-list`, `--permissions-revoke`).
 - Install/update permission reconciliation that drops grants no longer declared by manifest.
-- Creator tooling foundation: deterministic packaging and artifact verification (`--pack`, `--verify-artifact`).
-- Local registry publish workflow from creator artifacts (`--publish`).
+- Creator tooling: template scaffold (`--init-template`), deterministic packaging (`--pack`),
+  artifact verification (`--verify-artifact`), and local publish (`--publish`).
 - Creator dev workflow (`--dev`) with watch-mode rebuild/publish loops and documented starter
   template path.
 - Creator template scaffold command (`--init-template`) to create a new WASM game directory.
