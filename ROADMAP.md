@@ -155,6 +155,7 @@ Delivered so far:
 - CLI local index publish workflow via `--publish`.
 - Publish ergonomics: `--dry-run` planning and `--replace` for explicit version replacement.
 - CLI creator dev workflow via `--dev` (single cycle and watch mode).
+- CLI creator template scaffold workflow via `--init-template`.
 - `crates/creator` boundary introduced for creator-tooling APIs.
 - Publish quality gates:
   - manifest must declare `permissions` explicitly for marketplace publication

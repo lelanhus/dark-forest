@@ -33,6 +33,7 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Provider adapters (`builtin://`, `index://`)
   - Tarball artifact fetch + unpack helpers
 - `crates/creator`
+  - Template scaffolding for new WASM creator projects (`init-template`)
   - Creator-facing deterministic artifact packaging (`pack`)
   - Artifact metadata generation and serialization
   - Artifact verification against metadata + embedded manifest

@@ -4,7 +4,13 @@ This guide documents the current CLI-first creator workflow for milestone `M7`.
 
 ## Starter Template
 
-Use the starter scaffold in `templates/wasm-basic`:
+Generate a starter scaffold with creator CLI:
+
+```bash
+cargo run -p dark-forest -- --init-template /tmp/my-wasm-game --id my-wasm-game --name "My WASM Game" --author "Your Name" --version 0.1.0
+```
+
+Manual fallback using the starter scaffold in `templates/wasm-basic`:
 
 ```bash
 cp -R templates/wasm-basic /tmp/my-wasm-game

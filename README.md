@@ -41,6 +41,7 @@ Implemented post-`v0.1.0` (current workspace):
 - Local registry publish workflow from creator artifacts (`--publish`).
 - Creator dev workflow (`--dev`) with watch-mode rebuild/publish loops and documented starter
   template path.
+- Creator template scaffold command (`--init-template`) to create a new WASM game directory.
 - Marketplace publish quality gates for declared permissions and host API compatibility.
 
 ## Running
@@ -88,6 +89,7 @@ cargo run -p dark-forest -- --permissions-revoke remote-wasm --capability net
 Creator tooling:
 
 ```bash
+cargo run -p dark-forest -- --init-template /tmp/my-wasm-game --id my-wasm-game --name "My WASM Game" --author "Your Name" --version 0.1.0
 cargo run -p dark-forest -- --pack /path/to/game-dir
 cargo run -p dark-forest -- --pack /path/to/game-dir --out /tmp/sample-game-1.2.3.tar.gz --metadata-out /tmp/sample-game-1.2.3.metadata.json
 cargo run -p dark-forest -- --verify-artifact /tmp/sample-game-1.2.3.tar.gz --metadata /tmp/sample-game-1.2.3.metadata.json
@@ -122,7 +124,8 @@ Tag-driven release builds publish:
 - `crates/theme`: Forge theme tokens and style helpers.
 - `crates/diagnostics`: terminal and render diagnostics.
 - `crates/creator`: deterministic creator packaging (`pack`), artifact verification
-  (`verify-artifact`), local index publication (`publish`), and creator dev loop (`dev`).
+  (`verify-artifact`), local index publication (`publish`), creator dev loop (`dev`), and
+  template scaffolding (`init-template`).
 
 ## Quality Standards
 

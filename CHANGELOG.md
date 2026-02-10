@@ -10,6 +10,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - `crates/creator` crate for creator-tooling package/verification workflows.
 - New creator CLI modes:
+  - `--init-template <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]`
   - `--pack <game_dir> [--out <artifact.tar.gz>] [--metadata-out <metadata.json>]`
   - `--verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]`
   - `--publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]`
@@ -38,6 +39,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - reject manifests whose `host_api` range is incompatible with host API `0.1.0`
 - Starter creator template scaffold at `templates/wasm-basic`.
 - Creator hot-reload documentation in `docs/CREATOR_WORKFLOW.md`.
+- Template initialization workflow via creator CLI `--init-template`.
 
 ### Changed
 
