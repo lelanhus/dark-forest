@@ -2872,9 +2872,9 @@ mod tests {
     use super::{
         AppCapabilityEnforcer, ContentOperation, CreatorCommand, LaunchMode, PermissionsCommand,
         RegistryCommand, compute_hotload_signature, create_game_instance,
-        execute_content_operation, execute_permissions_command, execute_registry_command,
-        load_marketplace_catalog, parse_launch_mode, should_forward_key_to_runner,
-        should_render_frame,
+        execute_content_operation, execute_creator_command, execute_permissions_command,
+        execute_registry_command, load_marketplace_catalog, parse_launch_mode,
+        should_forward_key_to_runner, should_render_frame,
     };
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
@@ -3362,6 +3362,60 @@ mod tests {
             "--id".to_string(),
         ]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn init_template_command_creates_scaffold_and_report_paths() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("my-game");
+
+        let report = execute_creator_command(CreatorCommand::InitTemplate {
+            game_dir: game_dir.clone(),
+            game_id: Some("my-game".to_string()),
+            name: Some("My Game".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.5.0".to_string()),
+        })?;
+
+        assert!(report.success);
+        assert_eq!(report.command, "init-template");
+        assert_eq!(report.game_id.as_deref(), Some("my-game"));
+        assert_eq!(report.version.as_deref(), Some("0.5.0"));
+        let report_game_dir = report
+            .template_game_dir
+            .expect("template game dir should be present");
+        assert_eq!(report_game_dir, game_dir);
+        let manifest_path = report
+            .template_manifest_path
+            .expect("template manifest path should be present");
+        let entry_path = report
+            .template_entry_path
+            .expect("template entry path should be present");
+        let readme_path = report
+            .template_readme_path
+            .expect("template readme path should be present");
+        assert!(manifest_path.exists());
+        assert!(entry_path.exists());
+        assert!(readme_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_template_command_fails_for_nonempty_directory() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = temp.path().join("existing-game");
+        std::fs::create_dir_all(&game_dir)?;
+        std::fs::write(game_dir.join("occupied.txt"), b"already here")?;
+
+        let result = execute_creator_command(CreatorCommand::InitTemplate {
+            game_dir,
+            game_id: Some("existing-game".to_string()),
+            name: Some("Existing Game".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.1.0".to_string()),
+        });
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
