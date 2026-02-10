@@ -36,6 +36,29 @@ Every new dependency PR must include:
 - Run advisory checks in CI.
 - Run license checks in CI.
 - Track high-risk dependencies for periodic review.
+- Enforce dependency policy with:
+  - `cargo deny check advisories licenses bans sources`
+
+## Current Enforced Policy (`deny.toml`)
+
+Licenses allowlisted in CI:
+
+- `MIT`
+- `Apache-2.0`
+- `Apache-2.0 WITH LLVM-exception`
+- `MPL-2.0`
+- `BSD-3-Clause`
+- `BSD-2-Clause`
+- `ISC`
+- `CDLA-Permissive-2.0`
+- `Unicode-3.0`
+- `Zlib`
+
+Source restrictions in CI:
+
+- Unknown registries are denied.
+- Unknown git sources are denied.
+- Allowed registry: crates.io index (`https://github.com/rust-lang/crates.io-index`).
 
 ## Deprecation and Removal
 
