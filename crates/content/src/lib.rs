@@ -18,6 +18,24 @@ fn default_registry_scheme() -> String {
     "index".to_string()
 }
 
+fn default_prompt_sensitive_only() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityToggles {
+    #[serde(default = "default_prompt_sensitive_only")]
+    pub prompt_sensitive_only: bool,
+}
+
+impl Default for SecurityToggles {
+    fn default() -> Self {
+        Self {
+            prompt_sensitive_only: default_prompt_sensitive_only(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegistryConfig {
     #[serde(default = "default_registry_scheme")]
@@ -33,6 +51,8 @@ pub struct Settings {
     pub keymap_profile: String,
     #[serde(default)]
     pub registries: Vec<RegistryConfig>,
+    #[serde(default)]
+    pub security_toggles: SecurityToggles,
 }
 
 impl Default for Settings {
@@ -43,6 +63,7 @@ impl Default for Settings {
             performance_mode: "auto".to_string(),
             keymap_profile: "default".to_string(),
             registries: Vec::new(),
+            security_toggles: SecurityToggles::default(),
         }
     }
 }
@@ -1048,6 +1069,7 @@ mod tests {
         let store = JsonContentStore::new(PathBuf::from(temp.path()));
         let mut settings = store.load_settings()?;
         settings.performance_mode = "60".to_string();
+        settings.security_toggles.prompt_sensitive_only = false;
         settings.registries = vec![super::RegistryConfig {
             scheme: "index".to_string(),
             locator: "file:///tmp/index.json".to_string(),
@@ -1057,6 +1079,7 @@ mod tests {
         let reloaded = store.load_settings()?;
         assert_eq!(reloaded.performance_mode, "60");
         assert_eq!(reloaded.registries, settings.registries);
+        assert!(!reloaded.security_toggles.prompt_sensitive_only);
         Ok(())
     }
 
@@ -1079,6 +1102,32 @@ mod tests {
 
         let settings = store.load_settings()?;
         assert!(settings.registries.is_empty());
+        assert!(settings.security_toggles.prompt_sensitive_only);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_settings_without_security_toggles() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = PathBuf::from(temp.path());
+        let store = JsonContentStore::new(root.clone());
+        store.ensure_layout()?;
+
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "schema_version": 2,
+                "theme": "forge",
+                "performance_mode": "30",
+                "keymap_profile": "default",
+                "registries": [{"scheme":"index","locator":"file:///tmp/index.json"}]
+            }"#,
+        )?;
+
+        let settings = store.load_settings()?;
+        assert_eq!(settings.performance_mode, "30");
+        assert_eq!(settings.registries.len(), 1);
+        assert!(settings.security_toggles.prompt_sensitive_only);
         Ok(())
     }
 
