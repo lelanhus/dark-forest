@@ -35,6 +35,7 @@ enum AppEvent {
     Tick,
     OperationCompleted(OperationReport),
     HotReloadDetected,
+    MarketplaceCatalogLoaded(MarketplaceCatalogSnapshot),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,14 @@ enum LaunchMode {
     Interactive,
     Replay { path: PathBuf },
     Operation(ContentOperation),
+    Registry(RegistryCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegistryCommand {
+    List,
+    Add { locator: String },
+    Remove { locator: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +131,21 @@ impl OperationReport {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RegistryCommandReport {
+    command: String,
+    success: bool,
+    message: String,
+    registry_locators: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MarketplaceCatalogSnapshot {
+    games: Vec<shell::GameItem>,
+    install_locators: BTreeMap<String, String>,
+    warnings: Vec<String>,
+}
+
 struct AppModel {
     shell: ShellState,
     runner: RuntimeRunner,
@@ -136,6 +160,9 @@ struct AppModel {
     seed_counter: u64,
     last_render_at: Instant,
     builtin_games: Vec<shell::GameItem>,
+    marketplace_games: Vec<shell::GameItem>,
+    marketplace_install_locators: BTreeMap<String, String>,
+    marketplace_warnings: Vec<String>,
 }
 
 fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) -> bool {
@@ -172,6 +199,9 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --rollback <id>");
             println!("  dark-forest --verify <id>");
             println!("  dark-forest --remove <id>");
+            println!("  dark-forest --registry-list");
+            println!("  dark-forest --registry-add <locator>");
+            println!("  dark-forest --registry-remove <locator>");
             std::process::exit(0);
         }
         "--replay" => {
@@ -272,6 +302,28 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 game_id: args[1].clone(),
             }))
         }
+        "--registry-list" => {
+            if args.len() != 1 {
+                return Err(anyhow!("--registry-list takes no additional arguments"));
+            }
+            Ok(LaunchMode::Registry(RegistryCommand::List))
+        }
+        "--registry-add" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--registry-add requires exactly one locator"));
+            }
+            Ok(LaunchMode::Registry(RegistryCommand::Add {
+                locator: args[1].clone(),
+            }))
+        }
+        "--registry-remove" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--registry-remove requires exactly one locator"));
+            }
+            Ok(LaunchMode::Registry(RegistryCommand::Remove {
+                locator: args[1].clone(),
+            }))
+        }
         other => Err(anyhow!("unknown argument: {other}")),
     }
 }
@@ -299,6 +351,113 @@ fn run_operation_cli(operation: ContentOperation) -> Result<()> {
     println!("operation={}", report.operation);
     println!("success={}", report.success);
     println!("message={}", report.message);
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
+fn execute_registry_command(
+    root: PathBuf,
+    command: RegistryCommand,
+) -> Result<RegistryCommandReport> {
+    let store = JsonContentStore::new(root);
+    store.ensure_layout()?;
+    let mut settings = store.load_settings()?;
+
+    let mut locators = settings
+        .registries
+        .iter()
+        .filter(|item| item.scheme.eq_ignore_ascii_case("index"))
+        .map(|item| item.locator.clone())
+        .collect::<Vec<_>>();
+
+    match command {
+        RegistryCommand::List => Ok(RegistryCommandReport {
+            command: "registry-list".to_string(),
+            success: true,
+            message: format!("{} registries configured", locators.len()),
+            registry_locators: locators,
+        }),
+        RegistryCommand::Add { locator } => {
+            if locator.trim().is_empty() {
+                return Ok(RegistryCommandReport {
+                    command: "registry-add".to_string(),
+                    success: false,
+                    message: "registry locator must not be empty".to_string(),
+                    registry_locators: locators,
+                });
+            }
+
+            if locators.iter().any(|entry| entry == &locator) {
+                return Ok(RegistryCommandReport {
+                    command: "registry-add".to_string(),
+                    success: true,
+                    message: format!("registry already configured: {locator}"),
+                    registry_locators: locators,
+                });
+            }
+
+            settings.registries.push(content::RegistryConfig {
+                scheme: "index".to_string(),
+                locator: locator.clone(),
+            });
+            store.save_settings(&settings)?;
+
+            locators.push(locator.clone());
+            Ok(RegistryCommandReport {
+                command: "registry-add".to_string(),
+                success: true,
+                message: format!("registry added: {locator}"),
+                registry_locators: locators,
+            })
+        }
+        RegistryCommand::Remove { locator } => {
+            let before_len = settings.registries.len();
+            settings.registries.retain(|item| {
+                !(item.scheme.eq_ignore_ascii_case("index") && item.locator == locator)
+            });
+
+            if settings.registries.len() == before_len {
+                return Ok(RegistryCommandReport {
+                    command: "registry-remove".to_string(),
+                    success: false,
+                    message: format!("registry not configured: {locator}"),
+                    registry_locators: locators,
+                });
+            }
+
+            store.save_settings(&settings)?;
+            locators = settings
+                .registries
+                .iter()
+                .filter(|item| item.scheme.eq_ignore_ascii_case("index"))
+                .map(|item| item.locator.clone())
+                .collect::<Vec<_>>();
+
+            Ok(RegistryCommandReport {
+                command: "registry-remove".to_string(),
+                success: true,
+                message: format!("registry removed: {locator}"),
+                registry_locators: locators,
+            })
+        }
+    }
+}
+
+fn run_registry_cli(command: RegistryCommand) -> Result<()> {
+    let store = JsonContentStore::create_with_default_root()?;
+    let report = execute_registry_command(store.root().to_path_buf(), command)?;
+
+    println!("command={}", report.command);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+    println!("registry_count={}", report.registry_locators.len());
+    for (idx, locator) in report.registry_locators.iter().enumerate() {
+        println!("registry[{idx}]={locator}");
+    }
 
     if report.success {
         Ok(())
@@ -358,6 +517,63 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
         description: format!("Installed from {}", record.source),
         tags: vec!["installed".to_string()],
     }
+}
+
+fn load_marketplace_catalog(
+    settings: &content::Settings,
+    cache_root: PathBuf,
+) -> MarketplaceCatalogSnapshot {
+    let mut snapshot = MarketplaceCatalogSnapshot::default();
+
+    for registry in &settings.registries {
+        if !registry.scheme.eq_ignore_ascii_case("index") {
+            snapshot.warnings.push(format!(
+                "registry {} has unsupported scheme '{}'",
+                registry.locator, registry.scheme
+            ));
+            continue;
+        }
+
+        if registry.locator.trim().is_empty() {
+            snapshot
+                .warnings
+                .push("registry locator must not be empty".to_string());
+            continue;
+        }
+
+        let provider = IndexRegistryProvider::new(registry.locator.clone(), cache_root.clone());
+        match provider.list() {
+            Ok(listings) => {
+                for listing in listings {
+                    if let Some(previous) = snapshot.install_locators.get(&listing.id) {
+                        snapshot.warnings.push(format!(
+                            "duplicate marketplace id '{}' from {} ignored (already provided by {})",
+                            listing.id, registry.locator, previous
+                        ));
+                        continue;
+                    }
+
+                    snapshot
+                        .install_locators
+                        .insert(listing.id.clone(), registry.locator.clone());
+                    snapshot.games.push(shell::GameItem {
+                        id: listing.id,
+                        name: listing.name,
+                        description: listing.description,
+                        tags: listing.tags,
+                    });
+                }
+            }
+            Err(err) => {
+                snapshot.warnings.push(format!(
+                    "registry {} load failed: {}",
+                    registry.locator, err
+                ));
+            }
+        }
+    }
+
+    snapshot
 }
 
 fn select_unpacked_artifact_root(unpack_dir: &Path) -> Result<PathBuf> {
@@ -650,6 +866,9 @@ impl AppModel {
             seed_counter: Utc::now().timestamp() as u64,
             last_render_at: Instant::now(),
             builtin_games,
+            marketplace_games: Vec::new(),
+            marketplace_install_locators: BTreeMap::new(),
+            marketplace_warnings: Vec::new(),
         };
 
         model.refresh_game_catalog();
@@ -663,6 +882,13 @@ impl AppModel {
 
     fn refresh_game_catalog(&mut self) {
         let mut merged = self.builtin_games.clone();
+
+        for game in &self.marketplace_games {
+            if merged.iter().any(|item| item.id == game.id) {
+                continue;
+            }
+            merged.push(game.clone());
+        }
 
         for record in &self.installed.installed {
             if merged.iter().any(|game| game.id == record.id) {
@@ -679,6 +905,24 @@ impl AppModel {
                 .map(|item| item.id.clone())
                 .collect(),
         );
+    }
+
+    fn apply_marketplace_snapshot(&mut self, snapshot: MarketplaceCatalogSnapshot) {
+        self.marketplace_games = snapshot.games;
+        self.marketplace_install_locators = snapshot.install_locators;
+        self.refresh_game_catalog();
+
+        for warning in &snapshot.warnings {
+            if !self
+                .marketplace_warnings
+                .iter()
+                .any(|existing| existing == warning)
+            {
+                self.shell
+                    .push_notification(format!("Marketplace warning: {warning}"));
+            }
+        }
+        self.marketplace_warnings = snapshot.warnings;
     }
 
     fn refresh_installed_state(&mut self) -> bool {
@@ -808,7 +1052,8 @@ impl AppModel {
             ShellCommand::TogglePause => self.runner.toggle_pause(),
             ShellCommand::SetOverlay(overlay) => self.shell.overlay = overlay,
             ShellCommand::CyclePerformance => self.cycle_performance_mode(),
-            ShellCommand::UpdateInstalled(_)
+            ShellCommand::InstallSelected(_)
+            | ShellCommand::UpdateInstalled(_)
             | ShellCommand::RollbackInstalled(_)
             | ShellCommand::VerifyInstalled(_)
             | ShellCommand::RemoveInstalled(_)
@@ -973,6 +1218,7 @@ async fn main() -> Result<()> {
         LaunchMode::Interactive => run().await,
         LaunchMode::Replay { path } => run_replay_cli(&path),
         LaunchMode::Operation(operation) => run_operation_cli(operation),
+        LaunchMode::Registry(command) => run_registry_cli(command),
     }
 }
 
@@ -1087,6 +1333,35 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
         }
     });
 
+    let marketplace_running = Arc::clone(&running);
+    let marketplace_tx = event_tx.clone();
+    let marketplace_settings = model.settings.clone();
+    let marketplace_cache_root = model.store.cache_dir_path();
+    let marketplace_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        while marketplace_running.load(Ordering::SeqCst) {
+            interval.tick().await;
+            let settings = marketplace_settings.clone();
+            let cache_root = marketplace_cache_root.clone();
+            let snapshot = match tokio::task::spawn_blocking(move || {
+                load_marketplace_catalog(&settings, cache_root)
+            })
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(join_err) => MarketplaceCatalogSnapshot {
+                    games: Vec::new(),
+                    install_locators: BTreeMap::new(),
+                    warnings: vec![format!("marketplace refresh task failed: {join_err}")],
+                },
+            };
+
+            let _ = marketplace_tx
+                .send(AppEvent::MarketplaceCatalogLoaded(snapshot))
+                .await;
+        }
+    });
+
     let mut should_quit = false;
     while !should_quit {
         if let Some(event) = event_rx.recv().await {
@@ -1117,6 +1392,9 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                         );
                     }
                 }
+                AppEvent::MarketplaceCatalogLoaded(snapshot) => {
+                    model.apply_marketplace_snapshot(snapshot);
+                }
                 AppEvent::Terminal(event) => match event {
                     CrosstermEvent::Key(key) => {
                         if key.code == KeyCode::Char('c')
@@ -1140,6 +1418,29 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
 
                         for command in commands {
                             match command {
+                                ShellCommand::InstallSelected(id) => {
+                                    if model.installed.installed.iter().any(|item| item.id == id) {
+                                        continue;
+                                    }
+
+                                    if let Some(locator) =
+                                        model.marketplace_install_locators.get(&id).cloned()
+                                    {
+                                        enqueue_operation(
+                                            &mut model.shell,
+                                            &operation_tx,
+                                            ContentOperation::InstallIndex {
+                                                locator,
+                                                game_id: id,
+                                                version: None,
+                                            },
+                                        );
+                                    } else {
+                                        model.shell.set_error(format!(
+                                            "install source unavailable for game: {id}"
+                                        ));
+                                    }
+                                }
                                 ShellCommand::UpdateInstalled(id) => enqueue_operation(
                                     &mut model.shell,
                                     &operation_tx,
@@ -1200,6 +1501,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     let _ = input_task.await;
     let _ = tick_task.await;
     let _ = watch_task.await;
+    let _ = marketplace_task.await;
     let _ = operation_task.await;
 
     model.update_play_stats();
@@ -1230,7 +1532,8 @@ mod tests {
     use shell::{Overlay, Route, ShellCommand};
 
     use super::{
-        ContentOperation, LaunchMode, compute_hotload_signature, execute_content_operation,
+        ContentOperation, LaunchMode, RegistryCommand, compute_hotload_signature,
+        execute_content_operation, execute_registry_command, load_marketplace_catalog,
         parse_launch_mode, should_forward_key_to_runner, should_render_frame,
     };
 
@@ -1312,6 +1615,46 @@ mod tests {
             mode,
             LaunchMode::Operation(ContentOperation::Remove {
                 game_id: "snake-plus".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_registry_list_launch_mode() {
+        let mode = parse_launch_mode(vec!["--registry-list".to_string()])
+            .expect("registry-list mode should parse");
+
+        assert_eq!(mode, LaunchMode::Registry(RegistryCommand::List));
+    }
+
+    #[test]
+    fn parses_registry_add_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--registry-add".to_string(),
+            "file:///tmp/index.json".to_string(),
+        ])
+        .expect("registry-add mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Registry(RegistryCommand::Add {
+                locator: "file:///tmp/index.json".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_registry_remove_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--registry-remove".to_string(),
+            "file:///tmp/index.json".to_string(),
+        ])
+        .expect("registry-remove mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Registry(RegistryCommand::Remove {
+                locator: "file:///tmp/index.json".to_string(),
             })
         );
     }
@@ -1490,6 +1833,210 @@ mod tests {
                 .any(|item| item.id == "snake-plus")
         );
         assert!(!root.join("games/snake-plus").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_add_is_idempotent() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let first = execute_registry_command(
+            root.clone(),
+            RegistryCommand::Add {
+                locator: "file:///tmp/index.json".to_string(),
+            },
+        )?;
+        assert!(first.success);
+
+        let second = execute_registry_command(
+            root.clone(),
+            RegistryCommand::Add {
+                locator: "file:///tmp/index.json".to_string(),
+            },
+        )?;
+        assert!(second.success);
+        assert_eq!(second.registry_locators, vec!["file:///tmp/index.json"]);
+
+        let listed = execute_registry_command(root, RegistryCommand::List)?;
+        assert!(listed.success);
+        assert_eq!(listed.registry_locators, vec!["file:///tmp/index.json"]);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_remove_missing_is_failure() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let removed = execute_registry_command(
+            root,
+            RegistryCommand::Remove {
+                locator: "file:///tmp/missing-index.json".to_string(),
+            },
+        )?;
+        assert!(!removed.success);
+        assert_eq!(
+            removed.message,
+            "registry not configured: file:///tmp/missing-index.json"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_list_preserves_order() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        execute_registry_command(
+            root.clone(),
+            RegistryCommand::Add {
+                locator: "file:///tmp/first.json".to_string(),
+            },
+        )?;
+        execute_registry_command(
+            root.clone(),
+            RegistryCommand::Add {
+                locator: "file:///tmp/second.json".to_string(),
+            },
+        )?;
+
+        let listed = execute_registry_command(root, RegistryCommand::List)?;
+        assert!(listed.success);
+        assert_eq!(
+            listed.registry_locators,
+            vec!["file:///tmp/first.json", "file:///tmp/second.json"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn marketplace_catalog_loads_and_reports_errors() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let index_path = root.join("index.json");
+        std::fs::write(
+            &index_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "games": [{
+                    "id": "remote-snake",
+                    "name": "Remote Snake",
+                    "description": "Remote listing",
+                    "tags": ["arcade", "remote"],
+                    "author": "Remote Team",
+                    "versions": [{
+                        "version": "1.0.0",
+                        "artifact": "remote-snake-1.0.0.tar.gz"
+                    }]
+                }]
+            })
+            .to_string(),
+        )?;
+
+        let settings = content::Settings {
+            registries: vec![
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: index_path.to_string_lossy().to_string(),
+                },
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: root.join("missing.json").to_string_lossy().to_string(),
+                },
+            ],
+            ..content::Settings::default()
+        };
+
+        let snapshot = load_marketplace_catalog(&settings, root.join("cache"));
+        assert!(
+            snapshot.games.iter().any(|game| game.id == "remote-snake"),
+            "expected marketplace game to load"
+        );
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|item| item.contains("missing.json")),
+            "expected warning for failed registry fetch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn marketplace_catalog_deduplicates_by_first_registry() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let first_index = root.join("first.json");
+        std::fs::write(
+            &first_index,
+            serde_json::json!({
+                "schema_version": 1,
+                "games": [{
+                    "id": "dup-game",
+                    "name": "First Name",
+                    "description": "From first",
+                    "tags": ["first"],
+                    "author": "A",
+                    "versions": [{
+                        "version": "1.0.0",
+                        "artifact": "dup-game-1.0.0.tar.gz"
+                    }]
+                }]
+            })
+            .to_string(),
+        )?;
+
+        let second_index = root.join("second.json");
+        std::fs::write(
+            &second_index,
+            serde_json::json!({
+                "schema_version": 1,
+                "games": [{
+                    "id": "dup-game",
+                    "name": "Second Name",
+                    "description": "From second",
+                    "tags": ["second"],
+                    "author": "B",
+                    "versions": [{
+                        "version": "2.0.0",
+                        "artifact": "dup-game-2.0.0.tar.gz"
+                    }]
+                }]
+            })
+            .to_string(),
+        )?;
+
+        let settings = content::Settings {
+            registries: vec![
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: first_index.to_string_lossy().to_string(),
+                },
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: second_index.to_string_lossy().to_string(),
+                },
+            ],
+            ..content::Settings::default()
+        };
+
+        let snapshot = load_marketplace_catalog(&settings, root.join("cache"));
+        assert_eq!(snapshot.games.len(), 1);
+        assert_eq!(snapshot.games[0].name, "First Name");
+        assert_eq!(
+            snapshot.install_locators.get("dup-game"),
+            Some(&first_index.to_string_lossy().to_string())
+        );
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|item| item.contains("duplicate marketplace id")),
+            "expected duplicate warning"
+        );
         Ok(())
     }
 }

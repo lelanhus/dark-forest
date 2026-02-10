@@ -14,15 +14,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `index://` registry provider with cached index fallback and artifact download support.
 - Tarball artifact unpack helper used by index installs.
 - CLI operation modes: `--install-local`, `--install-index`, `--update`, `--rollback`, `--verify`, `--remove`.
+- CLI registry management modes: `--registry-list`, `--registry-add`, `--registry-remove`.
 - Shell Installed route action keybindings (`U` update, `B` rollback, `V` verify, `X` remove).
+- Shell Library/Game Detail install keybinding (`I`) for non-installed marketplace entries.
 - Polling hot-load detection for `installed.json` and `games/**/game.json`.
 - New ADR for content transactions and index provider architecture.
+- New ADR for registry settings and shell marketplace integration.
 
 ### Changed
 
 - Manifest parsing now normalizes mixed legacy/typed permission declarations into typed grants.
 - Installed detail panel actions are now active commands rather than planned placeholders.
 - App runtime now executes content operations through a serialized background worker queue.
+- App interactive mode now refreshes configured marketplace registries asynchronously and merges
+  remote listings into Library.
 - Remove operation revokes persisted permissions for the uninstalled game id.
 
 ### Fixed

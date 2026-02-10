@@ -27,6 +27,9 @@ Implemented post-`v0.1.0` (current workspace):
 - Background operation queue from the shell for Installed actions (`U` update, `B` rollback, `V` verify, `X` remove).
 - Polling-based hot-load refresh over `installed.json` and `games/**/game.json`.
 - Manifest permission normalization from legacy strings to typed capability grants.
+- Settings-backed registry configuration (`--registry-list`, `--registry-add`, `--registry-remove`).
+- Asynchronous marketplace catalog refresh in interactive mode from configured `index` registries.
+- Explicit remote install action in Library/Game Detail via `I` for non-installed marketplace entries.
 
 ## Running
 
@@ -51,6 +54,14 @@ cargo run -p dark-forest -- --update snake-plus
 cargo run -p dark-forest -- --rollback snake-plus
 cargo run -p dark-forest -- --verify snake-plus
 cargo run -p dark-forest -- --remove snake-plus
+```
+
+Registry configuration:
+
+```bash
+cargo run -p dark-forest -- --registry-list
+cargo run -p dark-forest -- --registry-add file:///path/to/index.json
+cargo run -p dark-forest -- --registry-remove file:///path/to/index.json
 ```
 
 ## Release Artifacts (v0.1.0)
