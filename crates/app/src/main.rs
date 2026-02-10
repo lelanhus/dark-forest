@@ -64,6 +64,9 @@ enum ContentOperation {
     Verify {
         game_id: String,
     },
+    Remove {
+        game_id: String,
+    },
 }
 
 impl ContentOperation {
@@ -86,6 +89,7 @@ impl ContentOperation {
             Self::Update { game_id } => format!("update:{game_id}"),
             Self::Rollback { game_id } => format!("rollback:{game_id}"),
             Self::Verify { game_id } => format!("verify:{game_id}"),
+            Self::Remove { game_id } => format!("remove:{game_id}"),
         }
     }
 }
@@ -167,6 +171,7 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --update <id>");
             println!("  dark-forest --rollback <id>");
             println!("  dark-forest --verify <id>");
+            println!("  dark-forest --remove <id>");
             std::process::exit(0);
         }
         "--replay" => {
@@ -256,6 +261,14 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 return Err(anyhow!("--verify requires exactly one game id"));
             }
             Ok(LaunchMode::Operation(ContentOperation::Verify {
+                game_id: args[1].clone(),
+            }))
+        }
+        "--remove" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--remove requires exactly one game id"));
+            }
+            Ok(LaunchMode::Operation(ContentOperation::Remove {
                 game_id: args[1].clone(),
             }))
         }
@@ -525,6 +538,16 @@ fn execute_content_operation(
                 ))
             }
         }
+        ContentOperation::Remove { game_id } => {
+            let outcome = store
+                .remove_game(&game_id)
+                .map_err(|err| anyhow!(err.to_string()))?;
+            Ok(OperationReport::success(
+                &operation,
+                format!("removed {}@{}", outcome.game_id, outcome.removed_version),
+                true,
+            ))
+        }
     }
 }
 
@@ -788,6 +811,7 @@ impl AppModel {
             ShellCommand::UpdateInstalled(_)
             | ShellCommand::RollbackInstalled(_)
             | ShellCommand::VerifyInstalled(_)
+            | ShellCommand::RemoveInstalled(_)
             | ShellCommand::None => {}
         }
 
@@ -1131,6 +1155,11 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                                     &operation_tx,
                                     ContentOperation::Verify { game_id: id },
                                 ),
+                                ShellCommand::RemoveInstalled(id) => enqueue_operation(
+                                    &mut model.shell,
+                                    &operation_tx,
+                                    ContentOperation::Remove { game_id: id },
+                                ),
                                 other => {
                                     if model.handle_shell_command(other) {
                                         should_quit = true;
@@ -1275,6 +1304,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_remove_launch_mode() {
+        let mode = parse_launch_mode(vec!["--remove".to_string(), "snake-plus".to_string()])
+            .expect("remove mode should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Operation(ContentOperation::Remove {
+                game_id: "snake-plus".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn rejects_unknown_launch_argument() {
         let error = parse_launch_mode(vec!["--nope".to_string()]);
         assert!(error.is_err());
@@ -1396,6 +1438,58 @@ mod tests {
             store.read_current_pointer("snake-plus"),
             Some("0.1.0".to_string())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_operation_deletes_installed_record_and_payload() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let artifact_v1 = root.join("artifact-v1");
+        std::fs::create_dir_all(&artifact_v1)?;
+
+        std::fs::write(
+            artifact_v1.join("game.json"),
+            serde_json::json!({
+                "id": "snake-plus",
+                "name": "Snake+",
+                "version": "0.1.0",
+                "author": "Dark Forest",
+                "entry_type": "wasm",
+                "entry": "main.wasm",
+                "host_api": "^0.1",
+                "permissions": ["terminal.raw_input"]
+            })
+            .to_string(),
+        )?;
+        std::fs::write(artifact_v1.join("main.wasm"), b"v1")?;
+
+        let install = execute_content_operation(
+            root.clone(),
+            ContentOperation::InstallLocal {
+                artifact_dir: artifact_v1,
+                source: Some("local://fixture".to_string()),
+            },
+        )?;
+        assert!(install.success);
+
+        let remove = execute_content_operation(
+            root.clone(),
+            ContentOperation::Remove {
+                game_id: "snake-plus".to_string(),
+            },
+        )?;
+        assert!(remove.success);
+
+        let store = content::JsonContentStore::new(root.clone());
+        let installed = store.load_installed()?;
+        assert!(
+            !installed
+                .installed
+                .iter()
+                .any(|item| item.id == "snake-plus")
+        );
+        assert!(!root.join("games/snake-plus").exists());
         Ok(())
     }
 }
