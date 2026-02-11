@@ -40,3 +40,19 @@ fn runner_handles_resize_without_panicking() -> Result<()> {
     assert_eq!(frame.height, 30);
     Ok(())
 }
+
+#[test]
+fn runner_can_start_new_builtin_games() -> Result<()> {
+    let mut runner = RuntimeRunner::new(90, 34);
+    for game_id in [games::MAZE_CHASE_ID, games::GALACTIC_INVADERS_ID] {
+        let game = games::instantiate(game_id, 77)?;
+        runner.start(game, 77)?;
+        assert!(runner.is_running());
+        runner.dispatch(RuntimeEvent::Tick { dt_ms: 32 })?;
+        let delta = runner.render();
+        assert!(!delta.changes.is_empty());
+        runner.stop();
+        assert!(!runner.is_running());
+    }
+    Ok(())
+}

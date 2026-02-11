@@ -1,0 +1,212 @@
+{
+  "name": "shell-routes-overlays",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 3000,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-search",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "/"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Search",
+          "Query: <empty>"
+        ]
+      }
+    },
+    {
+      "name": "close-search",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ],
+        "not_contains": [
+          "Query: <empty>"
+        ]
+      }
+    },
+    {
+      "name": "open-help",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "?"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Help",
+          "Runner: P, R, F, Esc"
+        ]
+      }
+    },
+    {
+      "name": "close-help",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ],
+        "not_contains": [
+          "Runner: P, R, F, Esc"
+        ]
+      }
+    },
+    {
+      "name": "open-command-palette",
+      "actions": [
+        {
+          "type": "text",
+          "payload": {
+            "text": "\u000b"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Command Palette",
+          "Open Library"
+        ]
+      }
+    },
+    {
+      "name": "palette-open-library",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Details"
+        ]
+      }
+    },
+    {
+      "name": "palette-open-installed",
+      "actions": [
+        {
+          "type": "text",
+          "payload": {
+            "text": "\u000b"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Installed"
+        ]
+      }
+    },
+    {
+      "name": "palette-open-settings",
+      "actions": [
+        {
+          "type": "text",
+          "payload": {
+            "text": "\u000b"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Settings",
+          "Performance: auto"
+        ]
+      }
+    }
+  ]
+}

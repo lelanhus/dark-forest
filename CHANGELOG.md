@@ -48,6 +48,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - hard drop / soft drop scoring and level-based gravity pacing
   - T-spin, combo, back-to-back, and perfect-clear scoring paths
 - Tetris-like render fallback that prints an explicit terminal-size warning when the viewport is too small.
+- Deterministic ptybox quality harness assets:
+  - `scripts/ptybox_driver_assert.py` driver-first assertion runner with per-step diagnostics and
+    `/tmp/df-ptybox-runs` artifacts.
+  - `tests/ptybox/policy.cli.json` reusable CLI policy for local/offline ptybox execution.
+  - `tests/ptybox/actions/*.json` reusable shell/game interactive driver scenarios.
+  - `tests/ptybox/run_full_suite.sh` full CLI + replay + interactive matrix loop with 3-pass stability runs.
+- Core built-in library expansion with two new native games:
+  - Maze Chase (`maze-chase`) with pellets/power-pellets, frightened mode, and four ghost roles.
+  - Galactic Invaders (`galactic-invaders`) with formation movement, shields, UFO bonuses, and wave progression.
+- Deterministic replay fixtures:
+  - `fixtures/replays/maze-chase-seed-9001.json`
+  - `fixtures/replays/galactic-invaders-seed-777.json`
+- Replay determinism coverage for Maze Chase and Galactic Invaders in `crates/app/tests/replay_determinism.rs`.
 
 ### Changed
 
@@ -65,6 +78,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   - short line-clear flash before row collapse
   - transient event banners for line clears, T-spins, combo, back-to-back, and perfect clears
   - explicit paused overlay and boxed game-over alert
+- Shell command-palette route actions now require explicit confirmation before leaving an active runner session.
+- Game listing metadata now supports optional `controls_summary` and Game Detail renders per-game controls.
+- Ptybox full-suite matrix now covers five built-ins and runner leave-confirm edge flow.
+
+### Fixed
+
+- `--install-index` no longer compares index artifact tarball checksums against unpacked-directory hashes.
+  Install integrity remains enforced through registry-provider artifact checksum validation before unpack.
+- Added regression coverage for publish/install roundtrips in app content-operation tests.
+- Snake+ no longer self-collides on first tick after launch due to corrected initial body ordering.
 
 ## [1.0.0] - 2026-02-10
 

@@ -1,0 +1,22 @@
+{
+  "game_id": "maze-chase",
+  "seed": 9001,
+  "width": 80,
+  "height": 30,
+  "events": [
+    {"type": "input", "key": "Left"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "input", "key": "Left"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "input", "key": "Up"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "input", "key": "Up"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "tick", "dt_ms": 140},
+    {"type": "tick", "dt_ms": 140}
+  ]
+}

@@ -1,0 +1,244 @@
+{
+  "name": "game-snake-plus",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 3500,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-library",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Snake+"
+        ]
+      }
+    },
+    {
+      "name": "open-snake-detail",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game Detail",
+          "Snake+"
+        ]
+      }
+    },
+    {
+      "name": "start-snake",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: snake-plus | running"
+        ]
+      }
+    },
+    {
+      "name": "snake-interaction",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Right"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Left"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game: snake-plus | running"
+        ]
+      }
+    },
+    {
+      "name": "pause-runner",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "p"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Paused",
+          "Game paused."
+        ]
+      }
+    },
+    {
+      "name": "resume-runner",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: snake-plus | running"
+        ]
+      }
+    },
+    {
+      "name": "fullscreen-on",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "f"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "snake-plus | running"
+        ],
+        "not_contains": [
+          "Runner HUD"
+        ]
+      }
+    },
+    {
+      "name": "fullscreen-off",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "f"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: snake-plus | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-confirm-open",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Quit Game?",
+          "Press Y or Enter to quit."
+        ]
+      }
+    },
+    {
+      "name": "quit-confirm-cancel",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "n"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game: snake-plus | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-confirm-open-again",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Quit Game?"
+        ]
+      }
+    },
+    {
+      "name": "quit-confirm-accept",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "y"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Snake+"
+        ]
+      }
+    }
+  ]
+}

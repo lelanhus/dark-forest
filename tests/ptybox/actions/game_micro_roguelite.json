@@ -1,0 +1,177 @@
+{
+  "name": "game-micro-roguelite",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 3500,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-library",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Micro Roguelite"
+        ]
+      }
+    },
+    {
+      "name": "select-micro",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game Detail",
+          "Micro Roguelite"
+        ]
+      }
+    },
+    {
+      "name": "start-micro",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: micro-roguelite | running"
+        ]
+      }
+    },
+    {
+      "name": "micro-interaction",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Right"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "w"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game: micro-roguelite | running",
+          "HP:"
+        ]
+      }
+    },
+    {
+      "name": "pause-micro",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "p"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Paused",
+          "Game paused."
+        ]
+      }
+    },
+    {
+      "name": "resume-micro",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game: micro-roguelite | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-micro",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "y"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Micro Roguelite"
+        ]
+      }
+    }
+  ]
+}

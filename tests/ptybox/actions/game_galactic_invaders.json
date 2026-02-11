@@ -1,0 +1,114 @@
+{
+  "name": "game-galactic-invaders",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 4000,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-library",
+      "actions": [
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Galactic Invaders"
+        ]
+      }
+    },
+    {
+      "name": "select-galactic",
+      "actions": [
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Game Detail",
+          "Galactic Invaders"
+        ]
+      }
+    },
+    {
+      "name": "start-galactic",
+      "actions": [
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: galactic-invaders | running"
+        ]
+      }
+    },
+    {
+      "name": "galactic-interaction",
+      "actions": [
+        {"type": "key", "payload": {"key": "Left"}},
+        {"type": "key", "payload": {"key": " "}},
+        {"type": "key", "payload": {"key": "Right"}}
+      ],
+      "expect": {
+        "contains": [
+          "Game: galactic-invaders | running"
+        ]
+      }
+    },
+    {
+      "name": "pause-galactic",
+      "actions": [
+        {"type": "key", "payload": {"key": "p"}}
+      ],
+      "expect": {
+        "contains": [
+          "Paused",
+          "Game paused."
+        ]
+      }
+    },
+    {
+      "name": "resume-galactic",
+      "actions": [
+        {"type": "key", "payload": {"key": "p"}}
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: galactic-invaders | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-galactic",
+      "actions": [
+        {"type": "key", "payload": {"key": "Escape"}},
+        {"type": "key", "payload": {"key": "y"}}
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Galactic Invaders"
+        ]
+      }
+    }
+  ]
+}

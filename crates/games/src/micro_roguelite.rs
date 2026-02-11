@@ -159,6 +159,11 @@ impl Game for MicroRoguelite {
                 KeyCode::Down | KeyCode::Char('s') => self.move_player(0, 1),
                 KeyCode::Left | KeyCode::Char('a') => self.move_player(-1, 0),
                 KeyCode::Right | KeyCode::Char('d') => self.move_player(1, 0),
+                KeyCode::Char(' ') | KeyCode::Char('.') => {
+                    self.turns = self.turns.saturating_add(1);
+                    self.push_log("You hold position.");
+                    self.enemy_turn();
+                }
                 _ => {}
             }
         }
@@ -223,6 +228,20 @@ impl Game for MicroRoguelite {
             );
         }
 
+        let controls = "Move: Arrows/WASD  Wait: Space";
+        for (idx, ch) in controls.chars().enumerate() {
+            frame.set(
+                map_x
+                    + u16::try_from(self.map_w + 2 + i16::try_from(idx).unwrap_or(0)).unwrap_or(0),
+                map_y,
+                Cell {
+                    glyph: ch,
+                    fg: Color::DarkGray,
+                    ..Cell::default()
+                },
+            );
+        }
+
         for (idx, line) in self.log.iter().rev().take(5).enumerate() {
             for (col, ch) in line.chars().enumerate() {
                 frame.set(
@@ -263,5 +282,37 @@ impl Game for MicroRoguelite {
 
     fn score(&self) -> i64 {
         self.score
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MicroRoguelite;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use runtime::{Game, InitCtx, RuntimeEvent, UpdateCtx};
+
+    #[test]
+    fn wait_turn_advances_turn_counter_and_logs_action() {
+        let mut game = MicroRoguelite::new(3);
+        game.init(&InitCtx {
+            width: 80,
+            height: 24,
+            seed: 3,
+        })
+        .expect("micro roguelite init should succeed");
+        let initial_turns = game.turns;
+
+        let mut ctx = UpdateCtx::new(80, 24);
+        game.update(
+            RuntimeEvent::Input(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty())),
+            &mut ctx,
+        )
+        .expect("wait input should succeed");
+
+        assert_eq!(game.turns, initial_turns + 1);
+        assert!(
+            game.log.iter().any(|line| line.contains("hold position")),
+            "expected wait action log entry"
+        );
     }
 }

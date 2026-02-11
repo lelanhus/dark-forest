@@ -16,7 +16,9 @@ The project uses a Rust workspace with crate-oriented boundaries.
 - `crates/shell`
   - Route system
   - Overlays (palette/search/help/toasts/progress/errors)
+  - Runner leave-confirm overlay for active game route transitions
   - Theme/chrome rendering orchestration
+  - Game detail rendering with per-game controls metadata
 - `crates/runtime`
   - Event loop contracts
   - Tick scheduling
@@ -31,6 +33,7 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Registry provider traits
   - Listing/resolve flows
   - Provider adapters (`builtin://`, `index://`)
+  - Optional catalog controls metadata (`controls_summary`) for UI-facing input hints
   - Tarball artifact fetch + unpack helpers
 - `crates/creator`
   - Template scaffolding for new WASM creator projects (`init-template`)
@@ -52,6 +55,16 @@ The project uses a Rust workspace with crate-oriented boundaries.
 - Built-in native games are trusted.
 - Third-party games are sandboxed WASM by default.
 - Process plugins are off by default and require explicit opt-in.
+
+## Core Built-ins
+
+The built-in native catalog currently includes:
+
+- Snake+
+- Tetris-like
+- Micro Roguelite
+- Maze Chase
+- Galactic Invaders
 
 Policy gates:
 

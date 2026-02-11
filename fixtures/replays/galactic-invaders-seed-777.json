@@ -1,0 +1,28 @@
+{
+  "game_id": "galactic-invaders",
+  "seed": 777,
+  "width": 90,
+  "height": 34,
+  "events": [
+    {"type": "input", "key": "Space"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Space"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Left"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "tick", "dt_ms": 16}
+  ]
+}

@@ -1568,6 +1568,7 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
             name: manifest.name,
             description: format!("Installed from {}", record.source),
             tags: vec!["installed".to_string()],
+            controls_summary: Vec::new(),
         };
     }
 
@@ -1576,6 +1577,7 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
         name: record.id.clone(),
         description: format!("Installed from {}", record.source),
         tags: vec!["installed".to_string()],
+        controls_summary: Vec::new(),
     }
 }
 
@@ -1707,6 +1709,7 @@ fn load_marketplace_catalog(
                         name: listing.name,
                         description: listing.description,
                         tags: listing.tags,
+                        controls_summary: listing.controls_summary,
                     });
                 }
             }
@@ -1781,7 +1784,9 @@ fn install_from_index(
         version: artifact.version,
         source: format!("index://{locator}"),
         artifact_dir: artifact_root,
-        expected_sha256: artifact.checksum_sha256,
+        // Registry provider already verifies artifact tarball checksum before unpacking.
+        // `install_from_directory` computes a directory hash, so avoid cross-format mismatch.
+        expected_sha256: None,
     });
 
     let _ = fs::remove_dir_all(&unpack_dir);
@@ -1965,6 +1970,7 @@ impl AppModel {
                 name: listing.name,
                 description: listing.description,
                 tags: listing.tags,
+                controls_summary: listing.controls_summary,
             })
             .collect::<Vec<_>>();
 
@@ -3792,6 +3798,76 @@ mod tests {
                 .any(|item| item.id == "snake-plus")
         );
         assert!(!root.join("games/snake-plus").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn publish_then_install_index_roundtrip_succeeds() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let game_dir = root.join("sample-game");
+        let dist_dir = root.join("dist");
+        std::fs::create_dir_all(&dist_dir)?;
+
+        let artifact_path = dist_dir.join("sample-game-0.1.0.tar.gz");
+        let metadata_path = dist_dir.join("sample-game-0.1.0.metadata.json");
+        let index_path = root.join("index.json");
+        let index_locator = format!("file://{}", index_path.display());
+
+        let init = execute_creator_command(CreatorCommand::InitTemplate {
+            game_dir: game_dir.clone(),
+            game_id: Some("sample-game".to_string()),
+            name: Some("Sample Game".to_string()),
+            author: Some("Dark Forest".to_string()),
+            version: Some("0.1.0".to_string()),
+        })?;
+        assert!(init.success);
+
+        let pack = execute_creator_command(CreatorCommand::Pack {
+            game_dir,
+            out: Some(artifact_path),
+            metadata_out: Some(metadata_path),
+        })?;
+        assert!(pack.success);
+        let artifact_path = pack
+            .artifact_path
+            .clone()
+            .expect("pack should include artifact path");
+        let metadata_path = pack
+            .metadata_path
+            .clone()
+            .expect("pack should include metadata path");
+
+        let publish = execute_creator_command(CreatorCommand::Publish {
+            artifact_path,
+            metadata_path: Some(metadata_path),
+            index_locator: index_locator.clone(),
+            dry_run: false,
+            replace_existing: false,
+        })?;
+        assert!(publish.success);
+
+        let content_root = root.join("content");
+        let install = execute_content_operation(
+            content_root.clone(),
+            ContentOperation::InstallIndex {
+                locator: index_locator,
+                game_id: "sample-game".to_string(),
+                version: Some("0.1.0".to_string()),
+            },
+        )?;
+        assert!(install.success, "{}", install.message);
+
+        let store = content::JsonContentStore::new(content_root);
+        let installed = store.load_installed()?;
+        let record = installed
+            .installed
+            .iter()
+            .find(|entry| entry.id == "sample-game")
+            .expect("sample-game should be installed");
+        assert_eq!(record.current_version, "0.1.0");
+        assert!(record.installed_versions.iter().any(|v| v == "0.1.0"));
+
         Ok(())
     }
 

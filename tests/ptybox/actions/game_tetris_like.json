@@ -1,0 +1,177 @@
+{
+  "name": "game-tetris-like",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 3500,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-library",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Tetris-like"
+        ]
+      }
+    },
+    {
+      "name": "select-tetris",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Game Detail",
+          "Tetris-like"
+        ]
+      }
+    },
+    {
+      "name": "start-tetris",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Enter"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "tetris-like | running",
+          "NEXT"
+        ]
+      }
+    },
+    {
+      "name": "tetris-interaction",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "x"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "c"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": " "
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "Down"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "tetris-like | running",
+          "SCORE"
+        ]
+      }
+    },
+    {
+      "name": "pause-tetris",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "p"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Paused",
+          "Game paused."
+        ]
+      }
+    },
+    {
+      "name": "resume-tetris",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "p"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "tetris-like | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-tetris",
+      "actions": [
+        {
+          "type": "key",
+          "payload": {
+            "key": "Escape"
+          }
+        },
+        {
+          "type": "key",
+          "payload": {
+            "key": "y"
+          }
+        }
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Tetris-like"
+        ]
+      }
+    }
+  ]
+}

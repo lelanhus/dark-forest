@@ -1,0 +1,52 @@
+{
+  "policy_version": 4,
+  "sandbox": "none",
+  "sandbox_unsafe_ack": true,
+  "network": "enabled",
+  "network_unsafe_ack": true,
+  "fs_write_unsafe_ack": true,
+  "fs_strict_write": false,
+  "fs": {
+    "allowed_read": [
+      "/tmp"
+    ],
+    "allowed_write": [
+      "/tmp"
+    ],
+    "working_dir": "/tmp"
+  },
+  "exec": {
+    "allowed_executables": [
+      "/usr/bin/env",
+      "/Users/x24102/Developer/dark-forest/target/debug/dark-forest"
+    ],
+    "allow_shell": false
+  },
+  "env": {
+    "allowlist": [],
+    "set": {},
+    "inherit": true
+  },
+  "budgets": {
+    "max_runtime_ms": 120000,
+    "max_steps": 50000,
+    "max_output_bytes": 8388608,
+    "max_snapshot_bytes": 2097152,
+    "max_wait_ms": 10000
+  },
+  "artifacts": {
+    "enabled": false,
+    "dir": null,
+    "overwrite": true
+  },
+  "replay": {
+    "strict": false,
+    "normalization_filters": [
+      "snapshot_id",
+      "run_id",
+      "session_id",
+      "observation_timestamp"
+    ],
+    "normalization_rules": []
+  }
+}

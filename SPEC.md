@@ -251,19 +251,22 @@ Events:
 
 ---
 
-## 8) Built-in native games (v0 shipping set)
+## 8) Built-in native games (core library)
 
-Ship 3 games that set the quality bar:
+Ship 5 games that set the quality bar:
 
 1. **Snake+** (arcade loop + pacing)
 2. **Tetris-like** (Guideline-style timing + input precision + panels)
 3. **Micro Roguelite** (multi-pane UI: map/log/stats; turn-based)
+4. **Maze Chase** (maze-routing pressure, pellets/power-pellets, ghost behaviors)
+5. **Galactic Invaders** (formation shooter, shields, UFO bonus target, escalating waves)
 
 Shared UX requirements:
 
 * consistent pause menu
 * restart/quit confirmations
 * local high scores + basic stats (plays, last played)
+* explicit leave confirmation before route changes away from an active runner session
 
 Tetris-like quality bar:
 
@@ -272,8 +275,10 @@ Tetris-like quality bar:
 * SRS rotation with wall kicks (I and JLSTZ tables)
 * hold slot, ghost piece, soft/hard drop, and T-spin/combo/back-to-back/perfect-clear scoring
 * deterministic held-input behavior for movement/drop repeat (DAS/ARR style), independent of terminal key-repeat variance
-* side panel must keep HOLD, labeled NEXT `1..5`, stats, and next-level progress readable without overlap at common runner sizes
-* lock-resolution feedback includes a short line-clear flash plus transient event banners for clear/spin/combo/B2B/perfect-clear outcomes
+* side panel must keep HOLD, labeled NEXT `1..5`, stats, and next-level progress readable
+  without overlap at common runner sizes
+* lock-resolution feedback includes a short line-clear flash plus transient event banners for
+  clear/spin/combo/B2B/perfect-clear outcomes
 * default runner behavior launches Tetris-like in fullscreen to avoid 20-row clipping on common terminal sizes
 
 ---
@@ -510,6 +515,11 @@ Release expectations:
 * Snake+, Tetris-like, Micro Roguelite
 * Shared UX overlays and high scores
 
+### Phase 3B — Expand core built-ins
+
+* Add Maze Chase and Galactic Invaders to core library
+* Keep replay determinism and shared runner UX standards across all built-ins
+
 ### Phase 4 — Local installs + hot-load (v0.2)
 
 * local provider, install/update/remove
@@ -549,6 +559,12 @@ Release expectations:
 * shell polish + runtime stable
 * 3 games shipped
 * cross-platform binaries in CI
+
+### DoD — Core library expansion
+
+* 5 built-in games shipped (Snake+, Tetris-like, Micro Roguelite, Maze Chase, Galactic Invaders)
+* active-runner leave flow requires explicit confirmation
+* replay determinism coverage exists for all built-ins
 
 ### DoD — v0.2
 
