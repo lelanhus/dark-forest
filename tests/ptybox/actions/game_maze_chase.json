@@ -1,0 +1,113 @@
+{
+  "name": "game-maze-chase",
+  "command": [
+    "/usr/bin/env",
+    "HOME={home}",
+    "{app_bin}"
+  ],
+  "defaults": {
+    "timeout_ms": 4000,
+    "poll_interval_ms": 75
+  },
+  "steps": [
+    {
+      "name": "startup-home",
+      "expect": {
+        "contains": [
+          "Home",
+          "Status"
+        ]
+      }
+    },
+    {
+      "name": "open-library",
+      "actions": [
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Maze Chase"
+        ]
+      }
+    },
+    {
+      "name": "select-maze",
+      "actions": [
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Down"}},
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Game Detail",
+          "Maze Chase"
+        ]
+      }
+    },
+    {
+      "name": "start-maze",
+      "actions": [
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: maze-chase | running"
+        ]
+      }
+    },
+    {
+      "name": "maze-interaction",
+      "actions": [
+        {"type": "key", "payload": {"key": "Left"}},
+        {"type": "key", "payload": {"key": "Up"}},
+        {"type": "key", "payload": {"key": "Right"}}
+      ],
+      "expect": {
+        "contains": [
+          "Game: maze-chase | running"
+        ]
+      }
+    },
+    {
+      "name": "pause-maze",
+      "actions": [
+        {"type": "key", "payload": {"key": "p"}}
+      ],
+      "expect": {
+        "contains": [
+          "Paused",
+          "Game paused."
+        ]
+      }
+    },
+    {
+      "name": "resume-maze",
+      "actions": [
+        {"type": "key", "payload": {"key": "Enter"}}
+      ],
+      "expect": {
+        "contains": [
+          "Runner HUD",
+          "Game: maze-chase | running"
+        ]
+      }
+    },
+    {
+      "name": "quit-maze",
+      "actions": [
+        {"type": "key", "payload": {"key": "Escape"}},
+        {"type": "key", "payload": {"key": "y"}}
+      ],
+      "expect": {
+        "contains": [
+          "Library",
+          "Maze Chase"
+        ]
+      }
+    }
+  ]
+}

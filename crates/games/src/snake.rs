@@ -69,6 +69,12 @@ impl SnakeGame {
         };
     }
 
+    fn step_interval_ms(&self) -> u32 {
+        let growth = u32::try_from(self.snake.len().saturating_sub(3)).unwrap_or(0);
+        let speedup = growth.saturating_mul(3).min(60);
+        120_u32.saturating_sub(speedup).max(60)
+    }
+
     fn step(&mut self) {
         if self.finished {
             return;
@@ -135,9 +141,9 @@ impl Game for SnakeGame {
         self.snake.clear();
         let center_x = i16::try_from(self.width / 2).unwrap_or(10);
         let center_y = i16::try_from(self.height / 2).unwrap_or(5);
-        self.snake.push_back((center_x - 1, center_y));
-        self.snake.push_back((center_x, center_y));
         self.snake.push_back((center_x + 1, center_y));
+        self.snake.push_back((center_x, center_y));
+        self.snake.push_back((center_x - 1, center_y));
         self.dir = Direction::Right;
         self.next_dir = Direction::Right;
         self.finished = false;
@@ -151,9 +157,12 @@ impl Game for SnakeGame {
             RuntimeEvent::Input(key) => self.apply_input(key),
             RuntimeEvent::Tick { dt_ms } => {
                 self.tick_accum = self.tick_accum.saturating_add(dt_ms);
-                if self.tick_accum >= 120 {
-                    self.tick_accum = 0;
+                while self.tick_accum >= self.step_interval_ms() {
+                    self.tick_accum = self.tick_accum.saturating_sub(self.step_interval_ms());
                     self.step();
+                    if self.finished {
+                        break;
+                    }
                 }
             }
             RuntimeEvent::Resize { w, h } => {
@@ -237,6 +246,27 @@ impl Game for SnakeGame {
             );
         }
 
+        let status = format!(
+            " SCORE:{} SPD:{} ",
+            self.score(),
+            u32::saturating_sub(180, self.step_interval_ms()),
+        );
+        for (offset, ch) in status.chars().enumerate() {
+            let x = 2_u16.saturating_add(u16::try_from(offset).unwrap_or(0));
+            if x >= width.saturating_sub(2) {
+                break;
+            }
+            frame.set(
+                x,
+                0,
+                Cell {
+                    glyph: ch,
+                    fg: Color::White,
+                    ..Cell::default()
+                },
+            );
+        }
+
         if self.finished {
             let text = "GAME OVER";
             let x_start = frame
@@ -264,5 +294,73 @@ impl Game for SnakeGame {
 
     fn score(&self) -> i64 {
         i64::try_from(self.snake.len().saturating_sub(3)).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SnakeGame;
+    use runtime::{Frame, Game, InitCtx, RuntimeEvent, UpdateCtx};
+
+    #[test]
+    fn snake_survives_first_tick_after_init() {
+        let mut game = SnakeGame::new(7);
+        let init = InitCtx {
+            width: 40,
+            height: 18,
+            seed: 7,
+        };
+        game.init(&init).expect("snake init should succeed");
+
+        let mut update = UpdateCtx::new(init.width, init.height);
+        game.update(RuntimeEvent::Tick { dt_ms: 120 }, &mut update)
+            .expect("snake tick should succeed");
+
+        assert!(
+            !game.is_finished(),
+            "snake should not immediately collide on first tick"
+        );
+    }
+
+    #[test]
+    fn snake_progressively_speeds_up_as_score_increases() {
+        let mut game = SnakeGame::new(9);
+        let init = InitCtx {
+            width: 40,
+            height: 18,
+            seed: 9,
+        };
+        game.init(&init).expect("snake init should succeed");
+
+        let base = game.step_interval_ms();
+        game.snake.extend([(1, 1), (2, 1), (3, 1), (4, 1)]);
+        let faster = game.step_interval_ms();
+
+        assert!(faster < base, "expected interval to shrink as snake grows");
+    }
+
+    #[test]
+    fn snake_render_includes_score_status_banner() {
+        let mut game = SnakeGame::new(11);
+        let init = InitCtx {
+            width: 40,
+            height: 18,
+            seed: 11,
+        };
+        game.init(&init).expect("snake init should succeed");
+        let mut frame = Frame::new(init.width, init.height);
+        game.render(&mut frame);
+
+        let mut text = String::new();
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                if let Some(cell) = frame.get(x, y) {
+                    text.push(cell.glyph);
+                }
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("SCORE:"));
     }
 }

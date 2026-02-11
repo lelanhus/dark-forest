@@ -14,7 +14,7 @@ Implemented in `v1.0.0`:
 - Shell routes: Home, Library, Installed, Settings, Game Detail, Runner.
 - Global overlays: command palette (`Ctrl+K`), contextual search (`/`), help (`?`), notifications, progress, and error detail.
 - Runtime contracts: fixed-timestep event loop, framebuffer model, diff rendering, pane/fullscreen runner, auto 30/60 policy.
-- Built-in games: Snake+, Guideline-like Tetris-like, Micro Roguelite.
+- Built-in games: Snake+, Guideline-like Tetris-like, Micro Roguelite, Maze Chase, Galactic Invaders.
 - Local persistence under `~/.dark-forest/` for settings, play history, installed records, and high scores.
 - Replay harness and headless replay execution mode.
 
@@ -43,6 +43,11 @@ Implemented post-`v0.1.0` (current workspace):
   template path.
 - Creator template scaffold command (`--init-template`) to create a new WASM game directory.
 - Marketplace publish quality gates for declared permissions and host API compatibility.
+- Core library expansion with two additional built-in arcade games:
+  - Maze Chase (`maze-chase`)
+  - Galactic Invaders (`galactic-invaders`)
+- Runner leave confirmation overlay for active-game route changes initiated from command palette route actions.
+- Snake+ launch pacing fix to prevent immediate self-collision on first tick.
 - Tetris-like now uses a Guideline-style ruleset:
   - 7-bag randomizer with SRS rotation/wall kicks
   - hold (`C`), ghost piece, and 5-piece next queue
@@ -66,6 +71,8 @@ Headless replay mode:
 ```bash
 cargo run -p dark-forest -- --replay fixtures/replays/snake-seed-12345.json
 cargo run -p dark-forest -- --replay fixtures/replays/tetris-like-seed-4242.json
+cargo run -p dark-forest -- --replay fixtures/replays/maze-chase-seed-9001.json
+cargo run -p dark-forest -- --replay fixtures/replays/galactic-invaders-seed-777.json
 ```
 
 Content operations:

@@ -86,6 +86,8 @@ pub struct GameListing {
     pub author: String,
     pub source: SourceRef,
     pub permissions_summary: Vec<String>,
+    #[serde(default)]
+    pub controls_summary: Vec<String>,
     pub host_api_range: String,
     pub entry_type: EntryType,
 }
@@ -286,6 +288,7 @@ impl RegistryProvider for IndexRegistryProvider {
                 author: game.author,
                 source: source.clone(),
                 permissions_summary,
+                controls_summary: game.controls_summary,
                 host_api_range,
                 entry_type,
             });
@@ -598,6 +601,8 @@ struct IndexGame {
     author: String,
     #[serde(default)]
     permissions_summary: Vec<String>,
+    #[serde(default)]
+    controls_summary: Vec<String>,
     #[serde(default)]
     host_api_range: String,
     #[serde(default)]

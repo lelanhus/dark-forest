@@ -1652,6 +1652,16 @@ impl Game for TetrisLikeGame {
         } else {
             "COMBO: -".to_string()
         };
+        let lock_text = if self.is_grounded() {
+            let pct = self
+                .lock_accum_ms
+                .saturating_mul(100)
+                .saturating_div(LOCK_DELAY_MS.max(1))
+                .min(100);
+            format!("LOCK: {:>3}%", pct)
+        } else {
+            "LOCK: ---".to_string()
+        };
         Self::write_text_clipped(
             frame,
             right_x,
@@ -1667,6 +1677,15 @@ impl Game for TetrisLikeGame {
             stats_start_y + 10,
             stats_text_w,
             &combo_text,
+            Color::White,
+            BG_FRAME,
+        );
+        Self::write_text_clipped(
+            frame,
+            right_x,
+            stats_start_y + 11,
+            stats_text_w,
+            &lock_text,
             Color::White,
             BG_FRAME,
         );
@@ -1709,7 +1728,7 @@ impl Game for TetrisLikeGame {
         );
 
         if self.finished {
-            let alert_h = 3_u16;
+            let alert_h = 4_u16;
             let alert_w = stats_w.max(11);
             let alert_y = panel_inner_y + panel_inner_h.saturating_sub(alert_h + 4);
             Self::draw_border(frame, right_x, alert_y, alert_w, alert_h, Color::Red);
@@ -1719,6 +1738,15 @@ impl Game for TetrisLikeGame {
                 alert_y + 1,
                 alert_w.saturating_sub(2),
                 "GAME OVER",
+                Color::Red,
+                BG_FRAME,
+            );
+            Self::write_text_clipped(
+                frame,
+                right_x + 1,
+                alert_y + 2,
+                alert_w.saturating_sub(2),
+                "R: RESTART",
                 Color::Red,
                 BG_FRAME,
             );
@@ -2236,6 +2264,16 @@ mod tests {
             .map(|banner| banner.text.clone())
             .unwrap_or_default();
         assert!(tspin_text.contains("T-SPIN"));
+    }
+
+    #[test]
+    fn render_includes_lock_indicator_text() {
+        let mut game = TetrisLikeGame::new(606);
+        game.reset_state();
+        let mut frame = Frame::new(140, 46);
+        game.render(&mut frame);
+        let content = frame_text(&frame);
+        assert!(content.contains("LOCK:"));
     }
 
     #[test]

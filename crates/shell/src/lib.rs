@@ -30,6 +30,7 @@ pub enum Overlay {
     RunnerPauseMenu,
     RunnerQuitConfirm,
     RunnerRestartConfirm,
+    RunnerLeaveConfirm,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,6 +67,7 @@ pub struct GameItem {
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
+    pub controls_summary: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,7 @@ pub struct ShellState {
     pub installed_game_ids: Vec<String>,
     pub permission_audit_entries: Vec<PermissionAuditEntry>,
     pub permission_prompt: Option<PermissionPromptState>,
+    pub runner_leave_target: Option<Route>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +221,7 @@ impl ShellState {
             installed_game_ids: Vec::new(),
             permission_audit_entries: Vec::new(),
             permission_prompt: None,
+            runner_leave_target: None,
         }
     }
 
@@ -337,24 +341,34 @@ impl ShellState {
         }
     }
 
-    fn execute_palette_action(&self, action: PaletteAction) -> Vec<ShellCommand> {
+    fn route_palette_action(&mut self, route: Route, has_running_game: bool) -> Vec<ShellCommand> {
+        if matches!(self.route, Route::Runner) && has_running_game {
+            self.runner_leave_target = Some(route);
+            return vec![ShellCommand::SetOverlay(Some(Overlay::RunnerLeaveConfirm))];
+        }
+
+        vec![
+            ShellCommand::OpenRoute(route),
+            ShellCommand::SetOverlay(None),
+        ]
+    }
+
+    fn execute_palette_action(
+        &mut self,
+        action: PaletteAction,
+        has_running_game: bool,
+    ) -> Vec<ShellCommand> {
         match action {
-            PaletteAction::OpenHome => vec![
-                ShellCommand::OpenRoute(Route::Home),
-                ShellCommand::SetOverlay(None),
-            ],
-            PaletteAction::OpenLibrary => vec![
-                ShellCommand::OpenRoute(Route::Library),
-                ShellCommand::SetOverlay(None),
-            ],
-            PaletteAction::OpenInstalled => vec![
-                ShellCommand::OpenRoute(Route::Installed),
-                ShellCommand::SetOverlay(None),
-            ],
-            PaletteAction::OpenSettings => vec![
-                ShellCommand::OpenRoute(Route::Settings),
-                ShellCommand::SetOverlay(None),
-            ],
+            PaletteAction::OpenHome => self.route_palette_action(Route::Home, has_running_game),
+            PaletteAction::OpenLibrary => {
+                self.route_palette_action(Route::Library, has_running_game)
+            }
+            PaletteAction::OpenInstalled => {
+                self.route_palette_action(Route::Installed, has_running_game)
+            }
+            PaletteAction::OpenSettings => {
+                self.route_palette_action(Route::Settings, has_running_game)
+            }
             PaletteAction::StartSelectedGame => {
                 if let Some(id) = self.selected_start_target() {
                     vec![ShellCommand::StartGame(id), ShellCommand::SetOverlay(None)]
@@ -368,10 +382,9 @@ impl ShellState {
                     ShellCommand::SetOverlay(None),
                 ]
             }
-            PaletteAction::OpenDiagnostics => vec![
-                ShellCommand::OpenRoute(Route::Settings),
-                ShellCommand::SetOverlay(None),
-            ],
+            PaletteAction::OpenDiagnostics => {
+                self.route_palette_action(Route::Settings, has_running_game)
+            }
             PaletteAction::OpenHelp => {
                 vec![ShellCommand::SetOverlay(Some(Overlay::Help))]
             }
@@ -432,7 +445,7 @@ impl ShellState {
                 }
                 KeyCode::Enter => {
                     let selected = self.command_palette_index.min(PALETTE_COMMANDS.len() - 1);
-                    self.execute_palette_action(PALETTE_COMMANDS[selected].action)
+                    self.execute_palette_action(PALETTE_COMMANDS[selected].action, has_running_game)
                 }
                 _ => vec![ShellCommand::None],
             },
@@ -515,6 +528,32 @@ impl ShellState {
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if runner_paused {
+                            vec![ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu))]
+                        } else {
+                            vec![ShellCommand::SetOverlay(None)]
+                        }
+                    }
+                    _ => vec![ShellCommand::None],
+                }
+            }
+            Overlay::RunnerLeaveConfirm => {
+                if !has_running_game {
+                    self.runner_leave_target = None;
+                    return vec![ShellCommand::SetOverlay(None)];
+                }
+
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let target = self.runner_leave_target.take().unwrap_or(Route::Home);
+                        vec![
+                            ShellCommand::StopGame,
+                            ShellCommand::OpenRoute(target),
+                            ShellCommand::SetOverlay(None),
+                        ]
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.runner_leave_target = None;
                         if runner_paused {
                             vec![ShellCommand::SetOverlay(Some(Overlay::RunnerPauseMenu))]
                         } else {
@@ -1168,11 +1207,27 @@ fn render_detail(
     let text = selected.map_or_else(
         || format!("Unknown game: {id}"),
         |game| {
+            let controls = if game.controls_summary.is_empty() {
+                vec![
+                    "Move: arrows or WASD".to_string(),
+                    "Pause menu: P".to_string(),
+                    "Restart confirm: R".to_string(),
+                    "Quit confirm: Esc".to_string(),
+                ]
+            } else {
+                game.controls_summary.clone()
+            };
+            let controls_text = controls
+                .into_iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
-                "{}\n\n{}\n\nVersion: {}\n\nControls:\n- Move: arrows or WASD\n- Pause menu: P\n- Restart confirm: R\n- Quit confirm: Esc\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nActions:\n- Enter: start game{}\n- Esc: back",
+                "{}\n\n{}\n\nVersion: {}\n\nControls:\n{}\n\nStats:\n- Plays: {}\n- Best score: {}\n- Last played: {}\n\nActions:\n- Enter: start game{}\n- Esc: back",
                 game.name,
                 game.description,
                 version,
+                controls_text,
                 stats.play_count,
                 best_score,
                 last_played,
@@ -1382,6 +1437,10 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, state: &ShellState) {
         Overlay::RunnerRestartConfirm => (
             "Restart Game?",
             "Press Y or Enter to restart.\nPress N or Esc to cancel.".to_string(),
+        ),
+        Overlay::RunnerLeaveConfirm => (
+            "Leave Active Game?",
+            "An active run is in progress.\n\nPress Y or Enter to stop and leave.\nPress N or Esc to stay in the game.".to_string(),
         ),
     };
 
@@ -1611,6 +1670,10 @@ mod tests {
                 name: "Snake+".to_string(),
                 description: "Arcade loop".to_string(),
                 tags: vec!["arcade".to_string(), "builtin".to_string()],
+                controls_summary: vec![
+                    "Move: arrows or WASD".to_string(),
+                    "Avoid walls and yourself".to_string(),
+                ],
             },
             GameItem {
                 id: "tetris-like".to_string(),
@@ -1620,6 +1683,12 @@ mod tests {
                     "arcade".to_string(),
                     "puzzle".to_string(),
                     "builtin".to_string(),
+                ],
+                controls_summary: vec![
+                    "Move: arrows or WASD".to_string(),
+                    "Rotate: Z/X".to_string(),
+                    "Hold: C".to_string(),
+                    "Hard drop: Space".to_string(),
                 ],
             },
         ]
@@ -1954,6 +2023,68 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_does_not_directly_leave_running_runner_route() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        state.overlay = Some(Overlay::CommandPalette);
+        state.command_palette_index = 0; // Open Home
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            true,
+            false,
+        );
+
+        assert!(
+            !commands
+                .iter()
+                .any(|cmd| matches!(cmd, ShellCommand::OpenRoute(Route::Home))),
+            "active runner should require explicit leave confirmation before route switch"
+        );
+    }
+
+    #[test]
+    fn runner_leave_confirm_accepts_and_stops_active_game() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        state.overlay = Some(Overlay::RunnerLeaveConfirm);
+        state.runner_leave_target = Some(Route::Home);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            true,
+            false,
+        );
+
+        assert_eq!(
+            commands,
+            vec![
+                ShellCommand::StopGame,
+                ShellCommand::OpenRoute(Route::Home),
+                ShellCommand::SetOverlay(None),
+            ]
+        );
+        assert!(state.runner_leave_target.is_none());
+    }
+
+    #[test]
+    fn runner_leave_confirm_cancel_keeps_runner_active() {
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::Runner;
+        state.overlay = Some(Overlay::RunnerLeaveConfirm);
+        state.runner_leave_target = Some(Route::Library);
+
+        let commands = state.handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+            true,
+            false,
+        );
+
+        assert_eq!(commands, vec![ShellCommand::SetOverlay(None)]);
+        assert!(state.runner_leave_target.is_none());
+    }
+
+    #[test]
     fn search_query_filters_list_and_restores_on_close() {
         let mut state = ShellState::new(sample_games());
         state.route = Route::Library;
@@ -2090,5 +2221,25 @@ mod tests {
                 PermissionPromptAction::AllowAlways
             )]
         );
+    }
+
+    #[test]
+    fn detail_screen_renders_game_specific_controls() -> std::io::Result<()> {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend)?;
+        let mut state = ShellState::new(sample_games());
+        state.route = Route::GameDetail {
+            id: "tetris-like".to_string(),
+        };
+
+        let context = RenderContext::default();
+        terminal.draw(|frame| {
+            render(frame, &state, &context);
+        })?;
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_buffer_contains(&buffer, "Rotate: Z/X");
+        assert_buffer_contains(&buffer, "Hard drop: Space");
+        Ok(())
     }
 }
