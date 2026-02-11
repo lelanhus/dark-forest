@@ -17,7 +17,10 @@ use creator::{
     game_dir_signature, init_wasm_template, pack_game, publish_to_index, run_dev_cycle,
     verify_artifact,
 };
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
+use crossterm::event::{
+    self, Event as CrosstermEvent, KeyCode, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -532,6 +535,24 @@ struct AppModel {
 
 fn should_render_frame(last_render_at: Instant, now: Instant, target: Duration) -> bool {
     now.duration_since(last_render_at) >= target
+}
+
+fn runner_dimensions(terminal_w: u16, terminal_h: u16, fullscreen: bool) -> (u16, u16) {
+    if fullscreen {
+        (
+            terminal_w.saturating_sub(2).max(20),
+            terminal_h.saturating_sub(2).max(10),
+        )
+    } else {
+        (
+            terminal_w.saturating_sub(4).max(20),
+            terminal_h.saturating_sub(8).max(10),
+        )
+    }
+}
+
+fn should_auto_fullscreen_for_game(game_id: &str) -> bool {
+    game_id == games::TETRIS_ID
 }
 
 fn should_forward_key_to_runner(
@@ -1965,7 +1986,8 @@ impl AppModel {
         }
 
         let (width, height) = terminal::size().unwrap_or((120, 40));
-        let mut runner = RuntimeRunner::new(width.saturating_sub(4), height.saturating_sub(8));
+        let (runner_w, runner_h) = runner_dimensions(width, height, false);
+        let mut runner = RuntimeRunner::new(runner_w, runner_h);
 
         let perf_mode = match settings.performance_mode.as_str() {
             "60" => PerfMode::Fps60,
@@ -2238,6 +2260,11 @@ impl AppModel {
     }
 
     fn start_game(&mut self, game_id: &str) {
+        if should_auto_fullscreen_for_game(game_id) && !self.runner.is_fullscreen() {
+            self.runner.toggle_fullscreen();
+        }
+        self.refresh_runner_size_from_terminal();
+
         let seed = self.next_seed();
         let enforcer = std::sync::Arc::new(AppCapabilityEnforcer {
             permissions: std::sync::Arc::clone(&self.shared_permissions),
@@ -2280,6 +2307,17 @@ impl AppModel {
         self.current_game_id = None;
         self.current_game_seed = None;
         self.current_game_started_at = None;
+    }
+
+    fn resize_runner_for_terminal(&mut self, terminal_w: u16, terminal_h: u16) {
+        let (runner_w, runner_h) =
+            runner_dimensions(terminal_w, terminal_h, self.runner.is_fullscreen());
+        self.runner.resize(runner_w, runner_h);
+    }
+
+    fn refresh_runner_size_from_terminal(&mut self) {
+        let (terminal_w, terminal_h) = terminal::size().unwrap_or((120, 40));
+        self.resize_runner_for_terminal(terminal_w, terminal_h);
     }
 
     fn update_play_stats(&mut self) {
@@ -2330,7 +2368,10 @@ impl AppModel {
                 let seed = self.next_seed();
                 let _ = self.runner.restart(seed);
             }
-            ShellCommand::ToggleFullscreen => self.runner.toggle_fullscreen(),
+            ShellCommand::ToggleFullscreen => {
+                self.runner.toggle_fullscreen();
+                self.refresh_runner_size_from_terminal();
+            }
             ShellCommand::TogglePause => self.runner.toggle_pause(),
             ShellCommand::SetOverlay(overlay) => self.shell.overlay = overlay,
             ShellCommand::CyclePerformance => self.cycle_performance_mode(),
@@ -2513,18 +2554,63 @@ async fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    let keyboard_enhancements_enabled = match enable_keyboard_enhancements(&mut stdout) {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            let _ = disable_raw_mode();
+            let _ = stdout.execute(LeaveAlternateScreen);
+            return Err(err);
+        }
+    };
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal).await;
+    let run_result = run_loop(&mut terminal).await;
 
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    let mut cleanup_error: Option<anyhow::Error> = None;
+    if keyboard_enhancements_enabled
+        && let Err(err) = disable_keyboard_enhancements(terminal.backend_mut())
+    {
+        cleanup_error = Some(err);
+    }
+    if let Err(err) = disable_raw_mode()
+        && cleanup_error.is_none()
+    {
+        cleanup_error = Some(anyhow::Error::from(err));
+    }
+    if let Err(err) = terminal.backend_mut().execute(LeaveAlternateScreen)
+        && cleanup_error.is_none()
+    {
+        cleanup_error = Some(anyhow::Error::from(err));
+    }
+    if let Err(err) = terminal.show_cursor()
+        && cleanup_error.is_none()
+    {
+        cleanup_error = Some(anyhow::Error::from(err));
+    }
 
-    result
+    if let Some(err) = cleanup_error {
+        return Err(err);
+    }
+
+    run_result
+}
+
+fn enable_keyboard_enhancements<W: std::io::Write>(writer: &mut W) -> Result<bool> {
+    let flags = KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+    writer
+        .execute(PushKeyboardEnhancementFlags(flags))
+        .map(|_| true)
+        .context("failed to enable keyboard enhancement flags")
+}
+
+fn disable_keyboard_enhancements<W: std::io::Write>(writer: &mut W) -> Result<()> {
+    writer
+        .execute(PopKeyboardEnhancementFlags)
+        .map(|_| ())
+        .context("failed to disable keyboard enhancement flags")
 }
 
 async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
@@ -2694,6 +2780,17 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                             continue;
                         }
 
+                        if key.kind == event::KeyEventKind::Release {
+                            let forward_release = model.shell.route == Route::Runner
+                                && model.shell.overlay.is_none()
+                                && model.runner.is_running()
+                                && !model.runner.is_paused();
+                            if forward_release {
+                                let _ = model.runner.dispatch(RuntimeEvent::Input(key));
+                            }
+                            continue;
+                        }
+
                         let commands = model.shell.handle_key(
                             key,
                             model.runner.is_running(),
@@ -2810,9 +2907,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                         }
                     }
                     CrosstermEvent::Resize(w, h) => {
-                        let runner_w = w.saturating_sub(4).max(20);
-                        let runner_h = h.saturating_sub(8).max(10);
-                        model.runner.resize(runner_w, runner_h);
+                        model.resize_runner_for_terminal(w, h);
                     }
                     CrosstermEvent::FocusLost => {
                         let _ = model.runner.dispatch(RuntimeEvent::FocusLost);
@@ -2872,9 +2967,10 @@ mod tests {
     use super::{
         AppCapabilityEnforcer, ContentOperation, CreatorCommand, LaunchMode, PermissionsCommand,
         RegistryCommand, compute_hotload_signature, create_game_instance,
-        execute_content_operation, execute_creator_command, execute_permissions_command,
-        execute_registry_command, load_marketplace_catalog, parse_launch_mode,
-        should_forward_key_to_runner, should_render_frame,
+        disable_keyboard_enhancements, enable_keyboard_enhancements, execute_content_operation,
+        execute_creator_command, execute_permissions_command, execute_registry_command,
+        load_marketplace_catalog, parse_launch_mode, runner_dimensions,
+        should_auto_fullscreen_for_game, should_forward_key_to_runner, should_render_frame,
     };
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
@@ -3527,6 +3623,27 @@ mod tests {
             None,
             true
         ));
+    }
+
+    #[test]
+    fn runner_dimension_helper_uses_fullscreen_layout() {
+        assert_eq!(runner_dimensions(80, 24, false), (76, 16));
+        assert_eq!(runner_dimensions(80, 24, true), (78, 22));
+    }
+
+    #[test]
+    fn tetris_auto_fullscreen_policy_is_scoped() {
+        assert!(should_auto_fullscreen_for_game("tetris-like"));
+        assert!(!should_auto_fullscreen_for_game("snake-plus"));
+    }
+
+    #[test]
+    fn keyboard_enhancement_setup_path_is_non_panicking() {
+        let mut sink = Vec::new();
+        let enabled = enable_keyboard_enhancements(&mut sink);
+        assert!(enabled.is_ok());
+        let disabled = disable_keyboard_enhancements(&mut sink);
+        assert!(disabled.is_ok());
     }
 
     #[test]

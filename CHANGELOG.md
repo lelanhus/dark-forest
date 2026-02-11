@@ -40,11 +40,31 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Starter creator template scaffold at `templates/wasm-basic`.
 - Creator hot-reload documentation in `docs/CREATOR_WORKFLOW.md`.
 - Template initialization workflow via creator CLI `--init-template`.
+- New deterministic replay fixture `fixtures/replays/tetris-like-seed-4242.json`.
+- Guideline-style Tetris-like gameplay systems:
+  - 7-bag randomizer with all 7 tetrominoes
+  - SRS rotation/wall-kick behavior (I and JLSTZ)
+  - hold slot, ghost piece, and 5-piece next queue
+  - hard drop / soft drop scoring and level-based gravity pacing
+  - T-spin, combo, back-to-back, and perfect-clear scoring paths
+- Tetris-like render fallback that prints an explicit terminal-size warning when the viewport is too small.
 
 ### Changed
 
 - Roadmap milestone `M7` status moved to complete for creator pack/verify/publish/dev plus
   template docs and marketplace quality gates.
+- Runner sizing now uses a single dimension helper across startup, resize, and fullscreen toggles.
+- Starting `tetris-like` now auto-enables fullscreen runner mode so the 20-row board fits on common `80x24` terminals.
+- Tetris-like input handling now uses deterministic held-key timing (`DAS`/`ARR`) and explicit key
+  press/release event kinds instead of terminal autorepeat behavior.
+- Tetris-like side panel now renders a stronger gameplay HUD hierarchy:
+  - persistent HOLD card
+  - labeled NEXT queue slots (`1`..`5`) with bordered cards and adaptive preview scaling up to 3x
+  - stats column including `NEXT LVL` progress
+- Tetris-like lock-resolution presentation now includes:
+  - short line-clear flash before row collapse
+  - transient event banners for line clears, T-spins, combo, back-to-back, and perfect clears
+  - explicit paused overlay and boxed game-over alert
 
 ## [1.0.0] - 2026-02-10
 

@@ -256,7 +256,7 @@ Events:
 Ship 3 games that set the quality bar:
 
 1. **Snake+** (arcade loop + pacing)
-2. **Tetris-like** (timing + input precision + panels)
+2. **Tetris-like** (Guideline-style timing + input precision + panels)
 3. **Micro Roguelite** (multi-pane UI: map/log/stats; turn-based)
 
 Shared UX requirements:
@@ -264,6 +264,17 @@ Shared UX requirements:
 * consistent pause menu
 * restart/quit confirmations
 * local high scores + basic stats (plays, last played)
+
+Tetris-like quality bar:
+
+* 10x20 visible board with hidden spawn rows and 7 tetrominoes (I, O, T, S, Z, J, L)
+* 7-bag randomizer and 5-piece next queue
+* SRS rotation with wall kicks (I and JLSTZ tables)
+* hold slot, ghost piece, soft/hard drop, and T-spin/combo/back-to-back/perfect-clear scoring
+* deterministic held-input behavior for movement/drop repeat (DAS/ARR style), independent of terminal key-repeat variance
+* side panel must keep HOLD, labeled NEXT `1..5`, stats, and next-level progress readable without overlap at common runner sizes
+* lock-resolution feedback includes a short line-clear flash plus transient event banners for clear/spin/combo/B2B/perfect-clear outcomes
+* default runner behavior launches Tetris-like in fullscreen to avoid 20-row clipping on common terminal sizes
 
 ---
 

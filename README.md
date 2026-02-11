@@ -14,7 +14,7 @@ Implemented in `v1.0.0`:
 - Shell routes: Home, Library, Installed, Settings, Game Detail, Runner.
 - Global overlays: command palette (`Ctrl+K`), contextual search (`/`), help (`?`), notifications, progress, and error detail.
 - Runtime contracts: fixed-timestep event loop, framebuffer model, diff rendering, pane/fullscreen runner, auto 30/60 policy.
-- Built-in games: Snake+, Tetris-like, Micro Roguelite.
+- Built-in games: Snake+, Guideline-like Tetris-like, Micro Roguelite.
 - Local persistence under `~/.dark-forest/` for settings, play history, installed records, and high scores.
 - Replay harness and headless replay execution mode.
 
@@ -43,6 +43,15 @@ Implemented post-`v0.1.0` (current workspace):
   template path.
 - Creator template scaffold command (`--init-template`) to create a new WASM game directory.
 - Marketplace publish quality gates for declared permissions and host API compatibility.
+- Tetris-like now uses a Guideline-style ruleset:
+  - 7-bag randomizer with SRS rotation/wall kicks
+  - hold (`C`), ghost piece, and 5-piece next queue
+  - soft drop (`Down`/`S`), hard drop (`Space`), rotate CW (`Up`/`W`/`X`), rotate CCW (`Z`)
+  - deterministic input repeat model for held movement/drop (DAS/ARR) independent of terminal autorepeat
+  - labeled `NEXT` slots (`1`..`5`) with adaptive preview scaling and a `NEXT LVL` goal indicator
+  - line-clear flash and transient scoring feedback banners (line clears, T-spins, combos, B2B, perfect clear)
+  - line clear, T-spin, combo, back-to-back, and perfect-clear scoring
+  - auto-fullscreen launch so the full 20-row board renders correctly on common terminals
 
 ## Running
 
@@ -56,6 +65,7 @@ Headless replay mode:
 
 ```bash
 cargo run -p dark-forest -- --replay fixtures/replays/snake-seed-12345.json
+cargo run -p dark-forest -- --replay fixtures/replays/tetris-like-seed-4242.json
 ```
 
 Content operations:
