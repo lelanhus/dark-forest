@@ -1086,9 +1086,9 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
                 return Ok(());
             }
         }
-        return Err(anyhow!(
+        Err(anyhow!(
             "no supported clipboard tool found (xclip or wl-copy)"
-        ));
+        ))
     }
 
     #[cfg(target_os = "windows")]
