@@ -27,7 +27,11 @@ wildcards = "allow"
 highlight = "all"
 skip = [
   { name = "rustix", version = "=0.38.44" },
-  { name = "unicode-width", version = "=0.1.14" }
+  { name = "unicode-width", version = "=0.1.14" },
+  { name = "getrandom", version = "=0.2.17" },
+  { name = "hashbrown", version = "=0.15.5" },
+  { name = "itertools", version = "=0.13.0" },
+  { name = "wasm-encoder", version = "=0.243.0" }
 ]
 
 [sources]
