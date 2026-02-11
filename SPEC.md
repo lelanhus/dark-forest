@@ -337,6 +337,11 @@ v1+:
 * `github://owner/repo@tag` (release-asset / tarball)
 * optional `oci://` artifacts
 
+Current implementation (`v2.0`):
+
+* `index://` + `github://` are shipped
+* `oci://` remains deferred
+
 ### 10.3 Marketplace UX (end state)
 
 * Categories, tags, search facets
@@ -429,6 +434,10 @@ Core entities:
 * **HighScores**: per game table
 * **Settings**: theme, performance, keymap, registries, security toggles
 * **PermissionsGrants**: granted scopes per game
+* **PublisherKeyring**: trusted publisher public keys
+* **KeymapProfiles**: profile bindings + per-game runner overrides
+
+Current on-disk schema baseline: `3` (legacy schema roots are backed up and reinitialized).
 
 ---
 
@@ -539,9 +548,9 @@ Release expectations:
 
 * templates, dev hot reload, pack/publish
 
-### Phase 8 — Marketplace maturity (v2.0+)
+### Phase 8 — Marketplace maturity (v2.0, complete)
 
-* multi-registry, verified publishers, signatures
+* multi-registry (`index://`, `github://`), verified publishers, signatures
 * collections, compatibility badges, install reproducibility
 
 ### Phase 9 — Console OS maturity (v3.0+)

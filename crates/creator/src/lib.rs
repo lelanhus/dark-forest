@@ -3,16 +3,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use flate2::{Compression, GzBuilder};
 use plugin_host::{Capability, Decision, EntryType, Scope};
 use registry::{parse_manifest, unpack_tarball_to_dir};
+use ring::rand::SystemRandom;
+use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType as TarEntryType, Header};
 
-pub const CREATOR_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const CREATOR_METADATA_SCHEMA_VERSION: u32 = 2;
 pub const CURRENT_HOST_API_VERSION: &str = "0.1.0";
 const WASM_BASIC_TEMPLATE_README: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -110,6 +113,39 @@ pub struct TemplateInitOutcome {
     pub version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeygenRequest {
+    pub publisher_id: String,
+    pub out_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeygenOutcome {
+    pub publisher_id: String,
+    pub private_key_path: PathBuf,
+    pub public_key_base64: String,
+    pub public_key_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignRequest {
+    pub artifact_path: PathBuf,
+    pub metadata_path: Option<PathBuf>,
+    pub publisher_id: String,
+    pub private_key_path: PathBuf,
+    pub signature_out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignOutcome {
+    pub artifact_path: PathBuf,
+    pub metadata_path: PathBuf,
+    pub signature_path: PathBuf,
+    pub publisher_id: String,
+    pub signature_base64: String,
+    pub public_key_fingerprint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageMetadata {
     pub schema_version: u32,
@@ -121,6 +157,14 @@ pub struct PackageMetadata {
     pub artifact_sha256: String,
     pub artifact_size_bytes: u64,
     pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub signature_alg: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub publisher_id: Option<String>,
+    #[serde(default)]
+    pub public_key_fingerprint: Option<String>,
 }
 
 pub fn pack_game(request: &PackRequest) -> Result<PackOutcome> {
@@ -168,6 +212,10 @@ pub fn pack_game(request: &PackRequest) -> Result<PackOutcome> {
         artifact_sha256,
         artifact_size_bytes,
         generated_at: Utc::now(),
+        signature_alg: None,
+        signature: None,
+        publisher_id: None,
+        public_key_fingerprint: None,
     };
 
     atomic_write_json(&metadata_path, &metadata)?;
@@ -298,6 +346,39 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         artifact_path: request.artifact_path.clone(),
         metadata_path: request.metadata_path.clone(),
     })?;
+    let metadata_raw = fs::read(&verify_outcome.metadata_path).with_context(|| {
+        format!(
+            "failed to read metadata {}",
+            verify_outcome.metadata_path.display()
+        )
+    })?;
+    let metadata: PackageMetadata = serde_json::from_slice(&metadata_raw).with_context(|| {
+        format!(
+            "failed to parse metadata {}",
+            verify_outcome.metadata_path.display()
+        )
+    })?;
+    let publisher_id = metadata
+        .publisher_id
+        .clone()
+        .ok_or_else(|| anyhow!("publish requires signed metadata with publisher_id"))?;
+    let signature = metadata
+        .signature
+        .clone()
+        .ok_or_else(|| anyhow!("publish requires signed metadata with signature"))?;
+    let signature_fingerprint = metadata
+        .public_key_fingerprint
+        .clone()
+        .ok_or_else(|| anyhow!("publish requires signed metadata with public_key_fingerprint"))?;
+    let signature_alg = metadata
+        .signature_alg
+        .clone()
+        .ok_or_else(|| anyhow!("publish requires signed metadata with signature_alg"))?;
+    if signature_alg != "ed25519" {
+        return Err(anyhow!(
+            "publish requires ed25519 signature_alg (found {signature_alg})"
+        ));
+    }
 
     let temp = tempfile::tempdir().context("failed to create temporary publish directory")?;
     unpack_tarball_to_dir(&request.artifact_path, temp.path())
@@ -330,6 +411,8 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             )
         })?;
     let published_artifact_path = index_dir.join(&artifact_file_name);
+    let signature_file_name = format!("{artifact_file_name}.sig");
+    let published_signature_path = index_dir.join(&signature_file_name);
     if !request.dry_run {
         stage_published_artifact(
             &request.artifact_path,
@@ -337,6 +420,7 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             &verify_outcome.artifact_sha256,
             request.replace_existing,
         )?;
+        atomic_write_bytes(&published_signature_path, signature.as_bytes())?;
     }
 
     let mut catalog = load_index_catalog(&index_path)?;
@@ -345,7 +429,10 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
     let version_entry = IndexVersion {
         version: manifest.version.clone(),
         artifact: artifact_file_name,
-        checksum_sha256: Some(verify_outcome.artifact_sha256.clone()),
+        artifact_sha256: Some(verify_outcome.artifact_sha256.clone()),
+        signature_uri: Some(signature_file_name),
+        publisher_id: Some(publisher_id.clone()),
+        signature_fingerprint: Some(signature_fingerprint),
         size_bytes: Some(verify_outcome.artifact_size_bytes),
         entry_type: Some(manifest.entry_type),
         host_api: Some(manifest.host_api.clone()),
@@ -366,7 +453,7 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             .iter_mut()
             .find(|item| item.version == manifest.version)
         {
-            if existing_version.checksum_sha256.as_deref() == Some(&verify_outcome.artifact_sha256)
+            if existing_version.artifact_sha256.as_deref() == Some(&verify_outcome.artifact_sha256)
             {
                 // idempotent publish for identical artifact/version
             } else if request.replace_existing {
@@ -388,6 +475,8 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
         existing.permissions_summary = summary;
         existing.host_api_range = manifest.host_api.clone();
         existing.entry_type = Some(manifest.entry_type);
+        existing.publisher_id = Some(publisher_id.clone());
+        existing.verified = true;
     } else {
         catalog.games.push(IndexGame {
             id: manifest.id.clone(),
@@ -398,6 +487,10 @@ pub fn publish_to_index(request: &PublishRequest) -> Result<PublishOutcome> {
             permissions_summary: summary,
             host_api_range: manifest.host_api.clone(),
             entry_type: Some(manifest.entry_type),
+            verified: true,
+            publisher_id: Some(publisher_id),
+            collections: Vec::new(),
+            compatibility: None,
             versions: vec![version_entry],
         });
         created_game = true;
@@ -430,6 +523,17 @@ pub fn run_dev_cycle(request: &DevRequest) -> Result<DevCycleOutcome> {
     let verify = verify_artifact(&VerifyRequest {
         artifact_path: pack.artifact_path.clone(),
         metadata_path: Some(pack.metadata_path.clone()),
+    })?;
+    let keygen = keygen_publisher(&KeygenRequest {
+        publisher_id: "local-dev".to_string(),
+        out_dir: request.game_dir.join(".dark-forest-dev"),
+    })?;
+    let _sign = sign_artifact(&SignRequest {
+        artifact_path: pack.artifact_path.clone(),
+        metadata_path: Some(pack.metadata_path.clone()),
+        publisher_id: "local-dev".to_string(),
+        private_key_path: keygen.private_key_path,
+        signature_out: None,
     })?;
     let publish = publish_to_index(&PublishRequest {
         artifact_path: pack.artifact_path.clone(),
@@ -506,6 +610,134 @@ pub fn init_wasm_template(request: &TemplateInitRequest) -> Result<TemplateInitO
     })
 }
 
+pub fn keygen_publisher(request: &KeygenRequest) -> Result<KeygenOutcome> {
+    validate_game_id(&request.publisher_id)?;
+    fs::create_dir_all(&request.out_dir).with_context(|| {
+        format!(
+            "failed to create publisher key output directory {}",
+            request.out_dir.display()
+        )
+    })?;
+
+    let rng = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|_| anyhow!("failed to generate ed25519 keypair"))?;
+    let key_pair =
+        Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| anyhow!("invalid ed25519 pkcs8"))?;
+
+    let private_key_path = request
+        .out_dir
+        .join(format!("{}.ed25519.pk8", request.publisher_id));
+    atomic_write_bytes(&private_key_path, pkcs8.as_ref())?;
+
+    let public_key_base64 =
+        base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
+    let public_key_fingerprint = fingerprint_public_key_bytes(key_pair.public_key().as_ref());
+
+    Ok(KeygenOutcome {
+        publisher_id: request.publisher_id.clone(),
+        private_key_path,
+        public_key_base64,
+        public_key_fingerprint,
+    })
+}
+
+pub fn sign_artifact(request: &SignRequest) -> Result<SignOutcome> {
+    let verify = verify_artifact(&VerifyRequest {
+        artifact_path: request.artifact_path.clone(),
+        metadata_path: request.metadata_path.clone(),
+    })?;
+
+    let metadata_raw = fs::read(&verify.metadata_path)
+        .with_context(|| format!("failed to read metadata {}", verify.metadata_path.display()))?;
+    let mut metadata: PackageMetadata =
+        serde_json::from_slice(&metadata_raw).with_context(|| {
+            format!(
+                "failed to parse metadata {}",
+                verify.metadata_path.display()
+            )
+        })?;
+
+    let private_key = fs::read(&request.private_key_path).with_context(|| {
+        format!(
+            "failed to read private key {}",
+            request.private_key_path.display()
+        )
+    })?;
+    let key_pair =
+        Ed25519KeyPair::from_pkcs8(&private_key).map_err(|_| anyhow!("invalid ed25519 pkcs8"))?;
+    let public_key_fingerprint = fingerprint_public_key_bytes(key_pair.public_key().as_ref());
+
+    let signature = key_pair.sign(verify.artifact_sha256.as_bytes());
+    let signature_base64 = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+
+    let signature_path = request
+        .signature_out
+        .clone()
+        .unwrap_or_else(|| default_signature_path(&request.artifact_path));
+    atomic_write_bytes(&signature_path, signature_base64.as_bytes())?;
+
+    metadata.schema_version = CREATOR_METADATA_SCHEMA_VERSION;
+    metadata.signature_alg = Some("ed25519".to_string());
+    metadata.signature = Some(signature_base64.clone());
+    metadata.publisher_id = Some(request.publisher_id.clone());
+    metadata.public_key_fingerprint = Some(public_key_fingerprint.clone());
+    atomic_write_json(&verify.metadata_path, &metadata)?;
+
+    Ok(SignOutcome {
+        artifact_path: request.artifact_path.clone(),
+        metadata_path: verify.metadata_path,
+        signature_path,
+        publisher_id: request.publisher_id.clone(),
+        signature_base64,
+        public_key_fingerprint,
+    })
+}
+
+pub fn verify_signature(metadata: &PackageMetadata, public_key_base64: &str) -> Result<()> {
+    let signature_alg = metadata
+        .signature_alg
+        .as_deref()
+        .ok_or_else(|| anyhow!("metadata signature_alg is missing"))?;
+    if signature_alg != "ed25519" {
+        return Err(anyhow!("unsupported signature algorithm: {signature_alg}"));
+    }
+
+    let signature_b64 = metadata
+        .signature
+        .as_deref()
+        .ok_or_else(|| anyhow!("metadata signature is missing"))?;
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64)
+        .with_context(|| "metadata signature is not valid base64")?;
+    let public_key = base64::engine::general_purpose::STANDARD
+        .decode(public_key_base64)
+        .with_context(|| "publisher public key is not valid base64")?;
+
+    if let Some(expected_fingerprint) = &metadata.public_key_fingerprint {
+        let actual_fingerprint = fingerprint_public_key_bytes(&public_key);
+        if &actual_fingerprint != expected_fingerprint {
+            return Err(anyhow!(
+                "public key fingerprint mismatch (expected {}, actual {})",
+                expected_fingerprint,
+                actual_fingerprint
+            ));
+        }
+    }
+
+    let verifier = signature::UnparsedPublicKey::new(&signature::ED25519, &public_key);
+    verifier
+        .verify(metadata.artifact_sha256.as_bytes(), &signature)
+        .map_err(|_| anyhow!("signature verification failed"))
+}
+
+pub fn public_key_fingerprint_from_base64(public_key_base64: &str) -> Result<String> {
+    let public_key = base64::engine::general_purpose::STANDARD
+        .decode(public_key_base64)
+        .with_context(|| "publisher public key is not valid base64")?;
+    Ok(fingerprint_public_key_bytes(&public_key))
+}
+
 pub fn game_dir_signature(game_dir: &Path) -> Result<String> {
     if !game_dir.exists() || !game_dir.is_dir() {
         return Err(anyhow!("game directory is invalid: {}", game_dir.display()));
@@ -530,6 +762,14 @@ pub fn game_dir_signature(game_dir: &Path) -> Result<String> {
 
 pub fn default_artifact_path(game_id: &str, version: &str) -> PathBuf {
     PathBuf::from("dist").join(format!("{game_id}-{version}.tar.gz"))
+}
+
+pub fn default_signature_path(artifact_path: &Path) -> PathBuf {
+    let file_name = artifact_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "artifact.tar.gz".to_string());
+    artifact_path.with_file_name(format!("{file_name}.sig"))
 }
 
 pub fn default_metadata_path(artifact_path: &Path) -> Result<PathBuf> {
@@ -762,6 +1002,10 @@ fn normalize_relative_path(path: &Path) -> String {
         .join("/")
 }
 
+fn fingerprint_public_key_bytes(bytes: &[u8]) -> String {
+    to_hex_lower(&Sha256::digest(bytes))
+}
+
 fn entry_type_label(value: impl Serialize) -> Result<String> {
     let serialized = serde_json::to_value(value).context("failed to serialize entry_type")?;
     serialized
@@ -887,6 +1131,14 @@ struct IndexGame {
     #[serde(default)]
     entry_type: Option<EntryType>,
     #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    publisher_id: Option<String>,
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
+    compatibility: Option<IndexCompatibility>,
+    #[serde(default)]
     versions: Vec<IndexVersion>,
 }
 
@@ -895,7 +1147,14 @@ struct IndexVersion {
     version: String,
     artifact: String,
     #[serde(default)]
-    checksum_sha256: Option<String>,
+    #[serde(alias = "checksum_sha256")]
+    artifact_sha256: Option<String>,
+    #[serde(default)]
+    signature_uri: Option<String>,
+    #[serde(default)]
+    publisher_id: Option<String>,
+    #[serde(default)]
+    signature_fingerprint: Option<String>,
     #[serde(default)]
     size_bytes: Option<u64>,
     #[serde(default)]
@@ -906,10 +1165,16 @@ struct IndexVersion {
     permissions: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexCompatibility {
+    host_api: String,
+    permissions: String,
+}
+
 fn load_index_catalog(index_path: &Path) -> Result<IndexCatalog> {
     if !index_path.exists() {
         return Ok(IndexCatalog {
-            schema_version: 1,
+            schema_version: 2,
             games: Vec::new(),
         });
     }
@@ -919,7 +1184,7 @@ fn load_index_catalog(index_path: &Path) -> Result<IndexCatalog> {
     let mut parsed: IndexCatalog = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse index {}", index_path.display()))?;
     if parsed.schema_version == 0 {
-        parsed.schema_version = 1;
+        parsed.schema_version = 2;
     }
     Ok(parsed)
 }
@@ -988,9 +1253,10 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DevRequest, PackRequest, PublishRequest, TemplateInitRequest, VerifyRequest,
-        default_artifact_path, default_metadata_path, game_dir_signature, init_wasm_template,
-        pack_game, publish_to_index, run_dev_cycle, verify_artifact,
+        DevRequest, KeygenRequest, PackRequest, PublishRequest, SignRequest, TemplateInitRequest,
+        VerifyRequest, default_artifact_path, default_metadata_path, game_dir_signature,
+        init_wasm_template, keygen_publisher, pack_game, publish_to_index, run_dev_cycle,
+        sign_artifact, verify_artifact, verify_signature,
     };
 
     static TEST_CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1102,6 +1368,25 @@ mod tests {
     fn write_wasm_payload(game_dir: &Path, payload: &[u8]) -> Result<()> {
         fs::write(game_dir.join("main.wasm"), payload)?;
         Ok(())
+    }
+
+    fn sign_for_publish(
+        root: &Path,
+        artifact_path: &Path,
+        metadata_path: &Path,
+    ) -> Result<super::KeygenOutcome> {
+        let keygen = keygen_publisher(&KeygenRequest {
+            publisher_id: "dark-forest".to_string(),
+            out_dir: root.join("keys"),
+        })?;
+        sign_artifact(&SignRequest {
+            artifact_path: artifact_path.to_path_buf(),
+            metadata_path: Some(metadata_path.to_path_buf()),
+            publisher_id: "dark-forest".to_string(),
+            private_key_path: keygen.private_key_path.clone(),
+            signature_out: None,
+        })?;
+        Ok(keygen)
     }
 
     #[test]
@@ -1352,6 +1637,34 @@ mod tests {
     }
 
     #[test]
+    fn keygen_and_sign_produce_verifiable_signature() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let game_dir = create_sample_game(temp.path(), "sample-game", "1.2.3")?;
+        let artifact_path = temp.path().join("out").join("sample-game-1.2.3.tar.gz");
+        let metadata_path = temp
+            .path()
+            .join("out")
+            .join("sample-game-1.2.3.metadata.json");
+
+        pack_game(&PackRequest {
+            game_dir,
+            out: Some(artifact_path.clone()),
+            metadata_out: Some(metadata_path.clone()),
+        })?;
+        let keygen = sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
+
+        let metadata_raw = fs::read(&metadata_path)?;
+        let metadata: super::PackageMetadata = serde_json::from_slice(&metadata_raw)?;
+        verify_signature(&metadata, &keygen.public_key_base64)?;
+        assert_eq!(metadata.publisher_id.as_deref(), Some("dark-forest"));
+        assert_eq!(
+            metadata.public_key_fingerprint.as_deref(),
+            Some(keygen.public_key_fingerprint.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pack_defaults_to_dist_when_out_not_provided() -> Result<()> {
         let _cwd_guard = TEST_CWD_LOCK.lock().expect("cwd lock must succeed");
         let temp = tempfile::tempdir()?;
@@ -1389,6 +1702,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let index_path = temp.path().join("registry").join("index.json");
         let outcome = publish_to_index(&PublishRequest {
@@ -1410,7 +1724,7 @@ mod tests {
 
         let index_raw = fs::read_to_string(&index_path)?;
         let index_json: Value = serde_json::from_str(&index_raw)?;
-        assert_eq!(index_json["schema_version"], 1);
+        assert_eq!(index_json["schema_version"], 2);
         assert_eq!(index_json["games"][0]["id"], "sample-game");
         assert_eq!(index_json["games"][0]["versions"][0]["version"], "1.2.3");
         Ok(())
@@ -1432,6 +1746,7 @@ mod tests {
             out: Some(artifact_v1.clone()),
             metadata_out: Some(metadata_v1.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_v1, &metadata_v1)?;
         publish_to_index(&PublishRequest {
             artifact_path: artifact_v1,
             metadata_path: Some(metadata_v1),
@@ -1451,6 +1766,7 @@ mod tests {
             out: Some(artifact_v2.clone()),
             metadata_out: Some(metadata_v2.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_v2, &metadata_v2)?;
         let publish_v2 = publish_to_index(&PublishRequest {
             artifact_path: artifact_v2,
             metadata_path: Some(metadata_v2),
@@ -1499,6 +1815,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let result = publish_to_index(&PublishRequest {
             artifact_path,
@@ -1526,6 +1843,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let index_path = temp.path().join("registry").join("index.json");
         let outcome = publish_to_index(&PublishRequest {
@@ -1558,6 +1876,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let index_path = temp.path().join("registry").join("index.json");
         let result = publish_to_index(&PublishRequest {
@@ -1595,6 +1914,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let index_path = temp.path().join("registry").join("index.json");
         let result = publish_to_index(&PublishRequest {
@@ -1632,6 +1952,7 @@ mod tests {
             out: Some(artifact_path.clone()),
             metadata_out: Some(metadata_path.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_path, &metadata_path)?;
 
         let index_path = temp.path().join("registry").join("index.json");
         let result = publish_to_index(&PublishRequest {
@@ -1669,6 +1990,7 @@ mod tests {
             out: Some(artifact_v1.clone()),
             metadata_out: Some(metadata_v1.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_v1, &metadata_v1)?;
         publish_to_index(&PublishRequest {
             artifact_path: artifact_v1,
             metadata_path: Some(metadata_v1),
@@ -1691,6 +2013,7 @@ mod tests {
             out: Some(artifact_v2.clone()),
             metadata_out: Some(metadata_v2.clone()),
         })?;
+        sign_for_publish(temp.path(), &artifact_v2, &metadata_v2)?;
 
         let conflict = publish_to_index(&PublishRequest {
             artifact_path: artifact_v2.clone(),
@@ -1715,7 +2038,7 @@ mod tests {
 
         let index_raw = fs::read_to_string(&index_path)?;
         let index_json: Value = serde_json::from_str(&index_raw)?;
-        let checksum = index_json["games"][0]["versions"][0]["checksum_sha256"]
+        let checksum = index_json["games"][0]["versions"][0]["artifact_sha256"]
             .as_str()
             .expect("checksum must be present");
         assert_ne!(checksum, pack_v1.metadata.artifact_sha256);

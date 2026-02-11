@@ -90,6 +90,14 @@ pub struct GameListing {
     pub controls_summary: Vec<String>,
     pub host_api_range: String,
     pub entry_type: EntryType,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub publisher_id: Option<String>,
+    #[serde(default)]
+    pub collections: Vec<String>,
+    #[serde(default)]
+    pub compatibility: Option<CompatibilityBadge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,14 +109,67 @@ pub struct ArtifactRef {
     #[serde(default)]
     pub artifact_uri: Option<String>,
     #[serde(default)]
-    pub checksum_sha256: Option<String>,
+    pub artifact_sha256: Option<String>,
+    #[serde(default)]
+    pub signature_uri: Option<String>,
+    #[serde(default)]
+    pub publisher_id: Option<String>,
+    #[serde(default)]
+    pub signature_fingerprint: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompatibilityBadge {
+    pub host_api: String,
+    pub permissions: String,
 }
 
 pub trait RegistryProvider: Send + Sync {
     fn list(&self) -> Result<Vec<GameListing>>;
     fn resolve(&self, id: &str, version: Option<&str>) -> Result<ArtifactRef>;
+}
+
+pub enum AnyRegistryProvider {
+    Index(IndexRegistryProvider),
+    Github(GithubRegistryProvider),
+}
+
+impl RegistryProvider for AnyRegistryProvider {
+    fn list(&self) -> Result<Vec<GameListing>> {
+        match self {
+            Self::Index(provider) => provider.list(),
+            Self::Github(provider) => provider.list(),
+        }
+    }
+
+    fn resolve(&self, id: &str, version: Option<&str>) -> Result<ArtifactRef> {
+        match self {
+            Self::Index(provider) => provider.resolve(id, version),
+            Self::Github(provider) => provider.resolve(id, version),
+        }
+    }
+}
+
+pub fn provider_from_locator(locator: &str, cache_root: PathBuf) -> Result<AnyRegistryProvider> {
+    let trimmed = locator.trim();
+    if trimmed.starts_with("github://") {
+        return Ok(AnyRegistryProvider::Github(GithubRegistryProvider::new(
+            trimmed.to_string(),
+            cache_root,
+        )?));
+    }
+
+    let normalized = if let Some(rest) = trimmed.strip_prefix("index://") {
+        rest.to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    Ok(AnyRegistryProvider::Index(IndexRegistryProvider::new(
+        normalized, cache_root,
+    )))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,7 +213,10 @@ impl RegistryProvider for BuiltinRegistry {
             source: listing.source.clone(),
             entry_type: listing.entry_type,
             artifact_uri: None,
-            checksum_sha256: None,
+            artifact_sha256: None,
+            signature_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
             size_bytes: None,
         })
     }
@@ -183,7 +247,7 @@ impl IndexRegistryProvider {
             .with_context(|| format!("failed to fetch artifact from {uri}"))?;
 
         let actual_sha = to_hex_lower(&Sha256::digest(&bytes));
-        if let Some(expected) = &artifact.checksum_sha256
+        if let Some(expected) = &artifact.artifact_sha256
             && !expected.eq_ignore_ascii_case(&actual_sha)
         {
             return Err(anyhow!(
@@ -263,6 +327,7 @@ impl RegistryProvider for IndexRegistryProvider {
         let mut listings = Vec::new();
         for game in catalog.games {
             let selected = select_version(&game, None)?.clone();
+            validate_index_version_security_fields(&selected)?;
             let entry_type = selected
                 .entry_type
                 .or(game.entry_type)
@@ -291,6 +356,10 @@ impl RegistryProvider for IndexRegistryProvider {
                 controls_summary: game.controls_summary,
                 host_api_range,
                 entry_type,
+                verified: game.verified,
+                publisher_id: game.publisher_id,
+                collections: game.collections,
+                compatibility: game.compatibility,
             });
         }
 
@@ -306,11 +375,20 @@ impl RegistryProvider for IndexRegistryProvider {
             .ok_or_else(|| anyhow!("unknown game id: {id}"))?;
 
         let selected = select_version(game, version)?;
+        validate_index_version_security_fields(selected)?;
         let entry_type = selected
             .entry_type
             .or(game.entry_type)
             .unwrap_or(EntryType::Wasm);
         let artifact_uri = resolve_locator_relative(&self.locator, &selected.artifact);
+        let signature_uri = selected
+            .signature_uri
+            .as_ref()
+            .map(|value| resolve_locator_relative(&self.locator, value));
+        let publisher_id = selected
+            .publisher_id
+            .clone()
+            .or_else(|| game.publisher_id.clone());
 
         Ok(ArtifactRef {
             id: id.to_string(),
@@ -318,7 +396,200 @@ impl RegistryProvider for IndexRegistryProvider {
             source: self.source_ref(),
             entry_type,
             artifact_uri: Some(artifact_uri),
-            checksum_sha256: selected.checksum_sha256.clone(),
+            artifact_sha256: selected.artifact_sha256.clone(),
+            signature_uri,
+            publisher_id,
+            signature_fingerprint: selected.signature_fingerprint.clone(),
+            size_bytes: selected.size_bytes,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GithubRegistryProvider {
+    locator: String,
+    cache_root: PathBuf,
+    owner: String,
+    repo: String,
+    tag: String,
+}
+
+impl GithubRegistryProvider {
+    pub fn new(locator: String, cache_root: PathBuf) -> Result<Self> {
+        let (owner, repo, tag) = parse_github_locator(&locator)?;
+        Ok(Self {
+            locator,
+            cache_root,
+            owner,
+            repo,
+            tag,
+        })
+    }
+
+    fn release_api_url(&self) -> String {
+        format!(
+            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            self.owner, self.repo, self.tag
+        )
+    }
+
+    fn cache_catalog_path(&self) -> PathBuf {
+        let digest = Sha256::digest(self.locator.as_bytes());
+        let key = to_hex_lower(&digest);
+        self.cache_root.join("github").join(format!("{key}.json"))
+    }
+
+    fn cache_catalog(&self, cached: &CachedGithubCatalog) -> Result<()> {
+        let path = self.cache_catalog_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(cached)?;
+        atomic_write_bytes(&path, &bytes)
+    }
+
+    fn load_cached_catalog(&self) -> Result<(IndexCatalog, String)> {
+        let path = self.cache_catalog_path();
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read cached github catalog {}", path.display()))?;
+        let cached: CachedGithubCatalog = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse cached github catalog {}", path.display()))?;
+        let catalog: IndexCatalog = serde_json::from_str(&cached.catalog_raw)
+            .context("failed to parse cached github index catalog payload")?;
+        Ok((catalog, cached.index_asset_url))
+    }
+
+    fn load_catalog(&self) -> Result<(IndexCatalog, String)> {
+        let release_url = self.release_api_url();
+        let fetched = (|| {
+            let release_raw = fetch_text_from_locator(&release_url)?;
+            let release: GithubRelease = serde_json::from_str(&release_raw).with_context(|| {
+                format!("failed to parse github release metadata from {release_url}")
+            })?;
+            let index_asset_url = release
+                .assets
+                .iter()
+                .find(|asset| asset.name == "index.json")
+                .map(|asset| asset.browser_download_url.clone())
+                .ok_or_else(|| anyhow!("github release does not contain index.json asset"))?;
+            let catalog_raw = fetch_text_from_locator(&index_asset_url)?;
+            let catalog: IndexCatalog = serde_json::from_str(&catalog_raw)
+                .with_context(|| format!("failed to parse index catalog from {index_asset_url}"))?;
+            self.cache_catalog(&CachedGithubCatalog {
+                index_asset_url: index_asset_url.clone(),
+                catalog_raw,
+            })?;
+            Ok::<(IndexCatalog, String), anyhow::Error>((catalog, index_asset_url))
+        })();
+
+        match fetched {
+            Ok(ok) => Ok(ok),
+            Err(fetch_err) => {
+                let cached = self.load_cached_catalog().with_context(|| {
+                    format!(
+                        "failed to fetch github catalog {} and no valid cache available",
+                        self.locator
+                    )
+                })?;
+                tracing::warn!(
+                    locator = %self.locator,
+                    error = %fetch_err,
+                    "using cached github catalog"
+                );
+                Ok(cached)
+            }
+        }
+    }
+
+    fn source_ref(&self) -> SourceRef {
+        SourceRef {
+            scheme: "github".to_string(),
+            locator: self.locator.clone(),
+        }
+    }
+}
+
+impl RegistryProvider for GithubRegistryProvider {
+    fn list(&self) -> Result<Vec<GameListing>> {
+        let (catalog, _index_asset_url) = self.load_catalog()?;
+        let source = self.source_ref();
+
+        let mut listings = Vec::new();
+        for game in catalog.games {
+            let selected = select_version(&game, None)?.clone();
+            validate_index_version_security_fields(&selected)?;
+            let entry_type = selected
+                .entry_type
+                .or(game.entry_type)
+                .unwrap_or(EntryType::Wasm);
+
+            let permissions_summary = if game.permissions_summary.is_empty() {
+                summarize_permissions(&selected.permissions)?
+            } else {
+                game.permissions_summary
+            };
+
+            let host_api_range = if game.host_api_range.trim().is_empty() {
+                selected.host_api.unwrap_or_else(|| "^0.1".to_string())
+            } else {
+                game.host_api_range
+            };
+
+            listings.push(GameListing {
+                id: game.id,
+                name: game.name,
+                description: game.description,
+                tags: game.tags,
+                author: game.author,
+                source: source.clone(),
+                permissions_summary,
+                controls_summary: game.controls_summary,
+                host_api_range,
+                entry_type,
+                verified: game.verified,
+                publisher_id: game.publisher_id,
+                collections: game.collections,
+                compatibility: game.compatibility,
+            });
+        }
+
+        Ok(listings)
+    }
+
+    fn resolve(&self, id: &str, version: Option<&str>) -> Result<ArtifactRef> {
+        let (catalog, index_asset_url) = self.load_catalog()?;
+        let game = catalog
+            .games
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| anyhow!("unknown game id: {id}"))?;
+
+        let selected = select_version(game, version)?;
+        validate_index_version_security_fields(selected)?;
+        let entry_type = selected
+            .entry_type
+            .or(game.entry_type)
+            .unwrap_or(EntryType::Wasm);
+        let artifact_uri = resolve_locator_relative(&index_asset_url, &selected.artifact);
+        let signature_uri = selected
+            .signature_uri
+            .as_ref()
+            .map(|value| resolve_locator_relative(&index_asset_url, value));
+        let publisher_id = selected
+            .publisher_id
+            .clone()
+            .or_else(|| game.publisher_id.clone());
+
+        Ok(ArtifactRef {
+            id: id.to_string(),
+            version: selected.version.clone(),
+            source: self.source_ref(),
+            entry_type,
+            artifact_uri: Some(artifact_uri),
+            artifact_sha256: selected.artifact_sha256.clone(),
+            signature_uri,
+            publisher_id,
+            signature_fingerprint: selected.signature_fingerprint.clone(),
             size_bytes: selected.size_bytes,
         })
     }
@@ -334,6 +605,10 @@ pub struct Manifest {
     pub entry: String,
     pub host_api: String,
     pub permissions: Vec<CapabilityGrant>,
+    pub controls: Option<String>,
+    pub changelog_url: Option<String>,
+    pub homepage: Option<String>,
+    pub license: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +622,14 @@ struct RawManifest {
     host_api: String,
     #[serde(default)]
     permissions: Vec<serde_json::Value>,
+    #[serde(default)]
+    controls: Option<String>,
+    #[serde(default)]
+    changelog_url: Option<String>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
 }
 
 pub fn parse_manifest(input: &str) -> Result<Manifest> {
@@ -372,6 +655,10 @@ pub fn parse_manifest(input: &str) -> Result<Manifest> {
         entry: parsed.entry,
         host_api: parsed.host_api,
         permissions,
+        controls: parsed.controls,
+        changelog_url: parsed.changelog_url,
+        homepage: parsed.homepage,
+        license: parsed.license,
     })
 }
 
@@ -608,6 +895,14 @@ struct IndexGame {
     #[serde(default)]
     entry_type: Option<EntryType>,
     #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    publisher_id: Option<String>,
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
+    compatibility: Option<CompatibilityBadge>,
+    #[serde(default)]
     versions: Vec<IndexVersion>,
 }
 
@@ -616,7 +911,14 @@ struct IndexVersion {
     version: String,
     artifact: String,
     #[serde(default)]
-    checksum_sha256: Option<String>,
+    #[serde(alias = "checksum_sha256")]
+    artifact_sha256: Option<String>,
+    #[serde(default)]
+    signature_uri: Option<String>,
+    #[serde(default)]
+    publisher_id: Option<String>,
+    #[serde(default)]
+    signature_fingerprint: Option<String>,
     #[serde(default)]
     size_bytes: Option<u64>,
     #[serde(default)]
@@ -625,6 +927,39 @@ struct IndexVersion {
     host_api: Option<String>,
     #[serde(default)]
     permissions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedGithubCatalog {
+    index_asset_url: String,
+    catalog_raw: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubRelease {
+    assets: Vec<GithubReleaseAsset>,
+}
+
+fn parse_github_locator(locator: &str) -> Result<(String, String, String)> {
+    let raw = locator
+        .strip_prefix("github://")
+        .ok_or_else(|| anyhow!("github locator must start with github://"))?;
+    let (repo_part, tag_part) = raw
+        .rsplit_once('@')
+        .ok_or_else(|| anyhow!("github locator must be github://owner/repo@tag"))?;
+    let (owner, repo) = repo_part
+        .split_once('/')
+        .ok_or_else(|| anyhow!("github locator must include owner/repo"))?;
+    if owner.trim().is_empty() || repo.trim().is_empty() || tag_part.trim().is_empty() {
+        return Err(anyhow!("github locator owner/repo/tag must not be empty"));
+    }
+    Ok((owner.to_string(), repo.to_string(), tag_part.to_string()))
 }
 
 fn select_version<'a>(game: &'a IndexGame, requested: Option<&str>) -> Result<&'a IndexVersion> {
@@ -662,6 +997,33 @@ fn select_version<'a>(game: &'a IndexGame, requested: Option<&str>) -> Result<&'
     game.versions
         .get(selected_index)
         .ok_or_else(|| anyhow!("invalid version index for game '{}'", game.id))
+}
+
+fn validate_index_version_security_fields(version: &IndexVersion) -> Result<()> {
+    if let Some(sha) = &version.artifact_sha256 {
+        let valid_len = sha.len() == 64;
+        let valid_hex = sha.chars().all(|ch| ch.is_ascii_hexdigit());
+        if !valid_len || !valid_hex {
+            return Err(anyhow!(
+                "invalid artifact_sha256 '{}': expected 64 lowercase/uppercase hex chars",
+                sha
+            ));
+        }
+    }
+
+    if let Some(signature_uri) = &version.signature_uri
+        && signature_uri.trim().is_empty()
+    {
+        return Err(anyhow!("signature_uri must not be empty when present"));
+    }
+
+    if let Some(publisher_id) = &version.publisher_id
+        && publisher_id.trim().is_empty()
+    {
+        return Err(anyhow!("publisher_id must not be empty when present"));
+    }
+
+    Ok(())
 }
 
 fn resolve_locator_relative(base_locator: &str, relative: &str) -> String {
@@ -717,6 +1079,14 @@ fn fetch_bytes_from_locator(locator: &str) -> Result<Vec<u8>> {
     fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
 }
 
+pub fn fetch_text(locator: &str) -> Result<String> {
+    fetch_text_from_locator(locator)
+}
+
+pub fn fetch_bytes(locator: &str) -> Result<Vec<u8>> {
+    fetch_bytes_from_locator(locator)
+}
+
 fn fetch_http_bytes_with_retry(locator: &str) -> Result<Vec<u8>> {
     let mut last_retryable_error = None::<String>;
     for attempt in 1..=HTTP_MAX_ATTEMPTS {
@@ -770,6 +1140,7 @@ fn fetch_http_bytes_once(locator: &str) -> std::result::Result<Vec<u8>, HttpAtte
     let response = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_millis(HTTP_CONNECT_TIMEOUT_MS))
         .timeout(Duration::from_millis(HTTP_READ_TIMEOUT_MS))
+        .user_agent("dark-forest/2.0")
         .build()
         .map_err(|err| HttpAttemptError::Transport(err.to_string()))?
         .get(locator)
@@ -1053,7 +1424,10 @@ mod tests {
             },
             entry_type: EntryType::Wasm,
             artifact_uri: Some(artifact_path.to_string_lossy().to_string()),
-            checksum_sha256: Some("deadbeef".to_string()),
+            artifact_sha256: Some("deadbeef".to_string()),
+            signature_uri: None,
+            publisher_id: None,
+            signature_fingerprint: None,
             size_bytes: None,
         };
 
@@ -1075,6 +1449,179 @@ mod tests {
         let manifest_raw = fs::read_to_string(unpacked.join("game.json"))?;
         let manifest = parse_manifest(&manifest_raw)?;
         assert_eq!(manifest.id, "snake-plus");
+        Ok(())
+    }
+
+    #[test]
+    fn github_provider_lists_and_resolves_release_assets() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let locator = "github://dark-forest/example-games@v1.2.3-a".to_string();
+        let release_url =
+            "https://api.github.com/repos/dark-forest/example-games/releases/tags/v1.2.3-a";
+        let index_asset_url = "https://mock.local/releases/v1.2.3-a/index.json";
+
+        let index_json = serde_json::json!({
+            "schema_version": 2,
+            "games": [
+                {
+                    "id": "snake-plus",
+                    "name": "Snake+",
+                    "description": "arcade",
+                    "author": "Dark Forest",
+                    "verified": true,
+                    "publisher_id": "dark-forest",
+                    "collections": ["Featured"],
+                    "compatibility": {"host_api":"compatible","permissions":"low-risk"},
+                    "permissions_summary": ["terminal.raw_input"],
+                    "host_api_range": "^0.1",
+                    "versions": [
+                        {
+                            "version": "0.2.0",
+                            "artifact": "snake-plus-0.2.0.tar.gz",
+                            "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "signature_uri": "snake-plus-0.2.0.sig",
+                            "signature_fingerprint": "pubkey-1"
+                        }
+                    ]
+                }
+            ]
+        });
+        let release_json = serde_json::json!({
+            "assets": [
+                {"name": "index.json", "browser_download_url": index_asset_url}
+            ]
+        });
+
+        register_http_mock(
+            release_url,
+            vec![MockHttpStep::Bytes(release_json.to_string().into())],
+        );
+        register_http_mock(
+            index_asset_url,
+            vec![MockHttpStep::Bytes(index_json.to_string().into())],
+        );
+
+        let provider = super::GithubRegistryProvider::new(locator.clone(), root.join("cache"))?;
+        let listings = provider.list()?;
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].source.scheme, "github");
+        assert!(listings[0].verified);
+        assert_eq!(listings[0].publisher_id.as_deref(), Some("dark-forest"));
+
+        let resolved = provider.resolve("snake-plus", None)?;
+        assert_eq!(
+            resolved.artifact_uri.as_deref(),
+            Some("https://mock.local/releases/v1.2.3-a/snake-plus-0.2.0.tar.gz")
+        );
+        assert_eq!(
+            resolved.signature_uri.as_deref(),
+            Some("https://mock.local/releases/v1.2.3-a/snake-plus-0.2.0.sig")
+        );
+        assert_eq!(resolved.publisher_id.as_deref(), Some("dark-forest"));
+        Ok(())
+    }
+
+    #[test]
+    fn github_provider_uses_cache_when_release_fetch_fails() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let locator = "github://dark-forest/example-games@v1.2.3-b".to_string();
+        let release_url =
+            "https://api.github.com/repos/dark-forest/example-games/releases/tags/v1.2.3-b";
+        let index_asset_url = "https://mock.local/releases/v1.2.3-b/index.json";
+
+        let index_json = serde_json::json!({
+            "schema_version": 2,
+            "games": [
+                {
+                    "id": "snake-plus",
+                    "name": "Snake+",
+                    "description": "arcade",
+                    "author": "Dark Forest",
+                    "versions": [
+                        {
+                            "version": "0.2.0",
+                            "artifact": "snake-plus-0.2.0.tar.gz",
+                            "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "permissions": ["terminal.raw_input"]
+                        }
+                    ]
+                }
+            ]
+        });
+        let release_json = serde_json::json!({
+            "assets": [
+                {"name": "index.json", "browser_download_url": index_asset_url}
+            ]
+        });
+
+        register_http_mock(
+            release_url,
+            vec![MockHttpStep::Bytes(release_json.to_string().into())],
+        );
+        register_http_mock(
+            index_asset_url,
+            vec![MockHttpStep::Bytes(index_json.to_string().into())],
+        );
+
+        let provider = super::GithubRegistryProvider::new(locator.clone(), root.join("cache"))?;
+        let first = provider.list()?;
+        assert_eq!(first.len(), 1);
+
+        register_http_mock(
+            release_url,
+            vec![MockHttpStep::Transport("offline".to_string())],
+        );
+        let second = provider.list()?;
+        assert_eq!(second.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn index_rejects_malformed_signature_fields() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let locator = root.join("index.json");
+        let payload = serde_json::json!({
+            "schema_version": 2,
+            "games": [
+                {
+                    "id": "snake-plus",
+                    "name": "Snake+",
+                    "author": "Dark Forest",
+                    "versions": [
+                        {
+                            "version": "0.2.0",
+                            "artifact": "snake-plus-0.2.0.tar.gz",
+                            "artifact_sha256": "not-hex",
+                            "signature_uri": "",
+                            "permissions": ["terminal.raw_input"]
+                        }
+                    ]
+                }
+            ]
+        });
+        fs::write(&locator, serde_json::to_vec_pretty(&payload)?)?;
+
+        let provider =
+            IndexRegistryProvider::new(locator.to_string_lossy().to_string(), root.join("cache"));
+        let err = provider
+            .list()
+            .expect_err("expected malformed signature fields to fail");
+        assert!(err.to_string().contains("invalid artifact_sha256"));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_factory_routes_supported_schemes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let index = super::provider_from_locator("file:///tmp/index.json", root.join("cache"))?;
+        assert!(matches!(index, super::AnyRegistryProvider::Index(_)));
+        let github =
+            super::provider_from_locator("github://owner/repo@v1.0.0", root.join("cache"))?;
+        assert!(matches!(github, super::AnyRegistryProvider::Github(_)));
         Ok(())
     }
 

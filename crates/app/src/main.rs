@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -13,13 +15,14 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use content::{ContentStore, JsonContentStore};
 use creator::{
-    DevRequest, PackRequest, PublishRequest, TemplateInitRequest, VerifyRequest,
-    game_dir_signature, init_wasm_template, pack_game, publish_to_index, run_dev_cycle,
-    verify_artifact,
+    DevRequest, KeygenRequest, PackRequest, PublishRequest, SignRequest, TemplateInitRequest,
+    VerifyRequest, game_dir_signature, init_wasm_template, keygen_publisher, pack_game,
+    public_key_fingerprint_from_base64, publish_to_index, run_dev_cycle, sign_artifact,
+    verify_artifact, verify_signature,
 };
 use crossterm::event::{
-    self, Event as CrosstermEvent, KeyCode, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -35,7 +38,8 @@ use plugin_host::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use registry::{
-    BuiltinRegistry, IndexRegistryProvider, RegistryProvider, parse_manifest, unpack_tarball_to_dir,
+    BuiltinRegistry, RegistryProvider, fetch_bytes, fetch_text, parse_manifest,
+    provider_from_locator, unpack_tarball_to_dir,
 };
 use runtime::{
     PerfMode, RunnerSignal, RuntimeEvent, RuntimeRunner, load_replay_from_path, run_replay,
@@ -58,6 +62,8 @@ enum LaunchMode {
     Operation(ContentOperation),
     Registry(RegistryCommand),
     Permissions(PermissionsCommand),
+    PublisherKeys(PublisherKeysCommand),
+    Keymap(KeymapCommand),
     Creator(CreatorCommand),
 }
 
@@ -80,6 +86,24 @@ enum PermissionsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum PublisherKeysCommand {
+    List,
+    Add {
+        publisher_id: String,
+        public_key_base64: String,
+    },
+    Remove {
+        publisher_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeymapCommand {
+    Export { path: PathBuf },
+    Import { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CreatorCommand {
     InitTemplate {
         game_dir: PathBuf,
@@ -96,6 +120,17 @@ enum CreatorCommand {
     VerifyArtifact {
         artifact_path: PathBuf,
         metadata_path: Option<PathBuf>,
+    },
+    Keygen {
+        publisher_id: String,
+        out_dir: PathBuf,
+    },
+    SignArtifact {
+        artifact_path: PathBuf,
+        metadata_path: Option<PathBuf>,
+        publisher_id: String,
+        private_key_path: PathBuf,
+        signature_out: Option<PathBuf>,
     },
     Publish {
         artifact_path: PathBuf,
@@ -139,6 +174,9 @@ enum ContentOperation {
     Remove {
         game_id: String,
     },
+    Reinstall {
+        game_id: String,
+    },
 }
 
 impl ContentOperation {
@@ -162,6 +200,7 @@ impl ContentOperation {
             Self::Rollback { game_id } => format!("rollback:{game_id}"),
             Self::Verify { game_id } => format!("verify:{game_id}"),
             Self::Remove { game_id } => format!("remove:{game_id}"),
+            Self::Reinstall { game_id } => format!("reinstall:{game_id}"),
         }
     }
 }
@@ -172,6 +211,8 @@ impl CreatorCommand {
             Self::InitTemplate { .. } => "init-template",
             Self::Pack { .. } => "pack",
             Self::VerifyArtifact { .. } => "verify-artifact",
+            Self::Keygen { .. } => "keygen",
+            Self::SignArtifact { .. } => "sign-artifact",
             Self::Publish { .. } => "publish",
             Self::Dev { .. } => "dev",
         }
@@ -229,6 +270,11 @@ impl CreatorCommandReport {
             template_manifest_path: Some(outcome.manifest_path),
             template_entry_path: Some(outcome.entry_path),
             template_readme_path: Some(outcome.readme_path),
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
         }
     }
 
@@ -257,6 +303,11 @@ impl CreatorCommandReport {
             template_manifest_path: None,
             template_entry_path: None,
             template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
         }
     }
 
@@ -282,6 +333,71 @@ impl CreatorCommandReport {
             template_manifest_path: None,
             template_entry_path: None,
             template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
+        }
+    }
+
+    fn success_keygen(outcome: creator::KeygenOutcome) -> Self {
+        Self {
+            command: "keygen".to_string(),
+            success: true,
+            message: format!("generated publisher key {}", outcome.publisher_id),
+            artifact_path: None,
+            metadata_path: None,
+            game_id: None,
+            version: None,
+            artifact_sha256: None,
+            artifact_size_bytes: None,
+            index_path: None,
+            created_game: None,
+            created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
+            private_key_path: Some(outcome.private_key_path),
+            public_key_base64: Some(outcome.public_key_base64),
+            public_key_fingerprint: Some(outcome.public_key_fingerprint),
+            signature_path: None,
+            signature_base64: None,
+        }
+    }
+
+    fn success_sign(outcome: creator::SignOutcome) -> Self {
+        Self {
+            command: "sign-artifact".to_string(),
+            success: true,
+            message: format!("signed artifact for publisher {}", outcome.publisher_id),
+            artifact_path: Some(outcome.artifact_path),
+            metadata_path: Some(outcome.metadata_path),
+            game_id: None,
+            version: None,
+            artifact_sha256: None,
+            artifact_size_bytes: None,
+            index_path: None,
+            created_game: None,
+            created_version: None,
+            replaced_existing_version: None,
+            dry_run: None,
+            watch_mode: None,
+            dev_cycles: None,
+            template_game_dir: None,
+            template_manifest_path: None,
+            template_entry_path: None,
+            template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: Some(outcome.public_key_fingerprint),
+            signature_path: Some(outcome.signature_path),
+            signature_base64: Some(outcome.signature_base64),
         }
     }
 
@@ -312,6 +428,11 @@ impl CreatorCommandReport {
             template_manifest_path: None,
             template_entry_path: None,
             template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
         }
     }
 
@@ -348,6 +469,11 @@ impl CreatorCommandReport {
             template_manifest_path: None,
             template_entry_path: None,
             template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
         }
     }
 
@@ -373,6 +499,11 @@ impl CreatorCommandReport {
             template_manifest_path: None,
             template_entry_path: None,
             template_readme_path: None,
+            private_key_path: None,
+            public_key_base64: None,
+            public_key_fingerprint: None,
+            signature_path: None,
+            signature_base64: None,
         }
     }
 }
@@ -391,6 +522,23 @@ struct PermissionsCommandReport {
     success: bool,
     message: String,
     grants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PublisherKeysCommandReport {
+    command: String,
+    success: bool,
+    message: String,
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KeymapCommandReport {
+    command: String,
+    success: bool,
+    message: String,
+    path: PathBuf,
+    active_profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +563,11 @@ struct CreatorCommandReport {
     template_manifest_path: Option<PathBuf>,
     template_entry_path: Option<PathBuf>,
     template_readme_path: Option<PathBuf>,
+    private_key_path: Option<PathBuf>,
+    public_key_base64: Option<String>,
+    public_key_fingerprint: Option<String>,
+    signature_path: Option<PathBuf>,
+    signature_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -512,6 +665,7 @@ struct AppModel {
     runner: RuntimeRunner,
     store: JsonContentStore,
     settings: content::Settings,
+    keymap_profiles: content::KeymapProfilesFile,
     play_history: content::PlayHistoryMap,
     installed: content::InstalledFile,
     permissions: content::PermissionsFile,
@@ -523,6 +677,7 @@ struct AppModel {
     paused_for_permission_prompt: bool,
     best_scores: BTreeMap<String, i64>,
     current_game_id: Option<String>,
+    pending_process_launch_game_id: Option<String>,
     current_game_seed: Option<u64>,
     current_game_started_at: Option<Instant>,
     seed_counter: u64,
@@ -567,6 +722,395 @@ fn should_forward_key_to_runner(
         && commands.iter().all(|cmd| matches!(cmd, ShellCommand::None))
 }
 
+fn keymap_actions_for_context(
+    route: &Route,
+    overlay: Option<shell::Overlay>,
+) -> &'static [&'static str] {
+    const GLOBAL: &[&str] = &["quit", "palette", "search", "help"];
+    const HOME: &[&str] = &["up", "down", "select", "quit", "palette", "search", "help"];
+    const SETTINGS: &[&str] = &[
+        "up", "down", "select", "back", "quit", "palette", "search", "help",
+    ];
+    const LIBRARY: &[&str] = &[
+        "up",
+        "down",
+        "select",
+        "back",
+        "library.install",
+        "filters.open",
+        "quit",
+        "palette",
+        "search",
+        "help",
+    ];
+    const INSTALLED: &[&str] = &[
+        "up",
+        "down",
+        "select",
+        "back",
+        "installed.update",
+        "installed.rollback",
+        "installed.verify",
+        "installed.remove",
+        "filters.open",
+        "quit",
+        "palette",
+        "search",
+        "help",
+    ];
+    const DETAIL: &[&str] = &[
+        "select",
+        "back",
+        "detail.install",
+        "detail.remove",
+        "quit",
+        "palette",
+        "search",
+        "help",
+    ];
+    const RUNNER: &[&str] = &[
+        "runner.pause",
+        "runner.restart",
+        "runner.fullscreen",
+        "runner.exit",
+        "quit",
+        "palette",
+        "search",
+        "help",
+    ];
+    const HOT_RELOAD: &[&str] = &["hot_reload.reload_now", "hot_reload.reload_later", "back"];
+    const ERROR_DETAIL: &[&str] = &["error.copy", "back"];
+    const PROCESS_PLUGIN_WARNING: &[&str] = &["select", "back"];
+
+    if let Some(active_overlay) = overlay {
+        return match active_overlay {
+            shell::Overlay::HotReloadPrompt => HOT_RELOAD,
+            shell::Overlay::ErrorDetail => ERROR_DETAIL,
+            shell::Overlay::ProcessPluginWarning => PROCESS_PLUGIN_WARNING,
+            _ => GLOBAL,
+        };
+    }
+
+    match route {
+        Route::Home => HOME,
+        Route::Library => LIBRARY,
+        Route::Installed => INSTALLED,
+        Route::Settings => SETTINGS,
+        Route::GameDetail { .. } => DETAIL,
+        Route::Runner => RUNNER,
+    }
+}
+
+fn normalize_binding_value(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "up" {
+        return Some("Up".to_string());
+    }
+    if lower == "down" {
+        return Some("Down".to_string());
+    }
+    if lower == "enter" {
+        return Some("Enter".to_string());
+    }
+    if lower == "esc" || lower == "escape" {
+        return Some("Esc".to_string());
+    }
+    if lower == "tab" {
+        return Some("Tab".to_string());
+    }
+    if lower == "space" {
+        return Some("Space".to_string());
+    }
+    if lower.starts_with("ctrl+") {
+        let tail = trimmed[5..].trim();
+        let mut chars = tail.chars();
+        let first = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        let label = if first.is_ascii_alphabetic() {
+            first.to_ascii_uppercase().to_string()
+        } else {
+            first.to_string()
+        };
+        return Some(format!("Ctrl+{label}"));
+    }
+
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if first == ' ' {
+        Some("Space".to_string())
+    } else if first.is_ascii_alphabetic() {
+        Some(first.to_ascii_uppercase().to_string())
+    } else {
+        Some(first.to_string())
+    }
+}
+
+fn normalize_key_event_binding(key: KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Up => Some("Up".to_string()),
+        KeyCode::Down => Some("Down".to_string()),
+        KeyCode::Enter => Some("Enter".to_string()),
+        KeyCode::Esc => Some("Esc".to_string()),
+        KeyCode::Tab => Some("Tab".to_string()),
+        KeyCode::Char(ch) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if ch.is_ascii_alphabetic() {
+                    Some(format!("Ctrl+{}", ch.to_ascii_uppercase()))
+                } else {
+                    Some(format!("Ctrl+{ch}"))
+                }
+            } else if ch == ' ' {
+                Some("Space".to_string())
+            } else if ch.is_ascii_alphabetic() {
+                Some(ch.to_ascii_uppercase().to_string())
+            } else {
+                Some(ch.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn canonical_binding_for_action(action: &str) -> Option<&'static str> {
+    match action {
+        "quit" => Some("Ctrl+Q"),
+        "palette" => Some("Ctrl+K"),
+        "search" => Some("/"),
+        "help" => Some("?"),
+        "up" => Some("Up"),
+        "down" => Some("Down"),
+        "select" => Some("Enter"),
+        "back" => Some("Esc"),
+        "library.install" => Some("I"),
+        "installed.update" => Some("U"),
+        "installed.rollback" => Some("B"),
+        "installed.verify" => Some("V"),
+        "installed.remove" => Some("X"),
+        "detail.install" => Some("I"),
+        "detail.remove" => Some("X"),
+        "filters.open" => Some("G"),
+        "runner.pause" => Some("P"),
+        "runner.restart" => Some("R"),
+        "runner.fullscreen" => Some("F"),
+        "runner.exit" => Some("Esc"),
+        "hot_reload.reload_now" => Some("R"),
+        "hot_reload.reload_later" => Some("L"),
+        "error.copy" => Some("C"),
+        _ => None,
+    }
+}
+
+fn canonical_key_for_action(action: &str) -> Option<KeyEvent> {
+    match action {
+        "quit" => Some(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        "palette" => Some(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+        "search" => Some(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty())),
+        "help" => Some(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty())),
+        "up" => Some(KeyEvent::new(KeyCode::Up, KeyModifiers::empty())),
+        "down" => Some(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())),
+        "select" => Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+        "back" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+        "library.install" | "detail.install" => {
+            Some(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()))
+        }
+        "installed.update" => Some(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty())),
+        "installed.rollback" => Some(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty())),
+        "installed.verify" => Some(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::empty())),
+        "installed.remove" | "detail.remove" => {
+            Some(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()))
+        }
+        "filters.open" => Some(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())),
+        "runner.pause" => Some(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty())),
+        "runner.restart" => Some(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        "runner.fullscreen" => Some(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty())),
+        "runner.exit" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+        "hot_reload.reload_now" => Some(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        "hot_reload.reload_later" => Some(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty())),
+        "error.copy" => Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty())),
+        _ => None,
+    }
+}
+
+fn resolved_binding_for_action(
+    action: &str,
+    keymap_profiles: &content::KeymapProfilesFile,
+    active_profile: &str,
+    route: &Route,
+    current_game_id: Option<&str>,
+) -> Option<String> {
+    let mut binding = keymap_profiles
+        .profiles
+        .get("default")
+        .and_then(|profile| profile.bindings.get(action).cloned())
+        .and_then(|value| normalize_binding_value(&value));
+
+    if let Some(profile) = keymap_profiles.profiles.get(active_profile)
+        && let Some(value) = profile.bindings.get(action)
+    {
+        binding = normalize_binding_value(value);
+    }
+
+    if matches!(route, Route::Runner)
+        && let Some(game_id) = current_game_id
+        && let Some(overrides) = keymap_profiles.game_overrides.get(game_id)
+        && let Some(value) = overrides.get(action)
+    {
+        binding = normalize_binding_value(value);
+    }
+
+    binding
+}
+
+fn remap_key_event_with_profiles(
+    key: KeyEvent,
+    route: &Route,
+    overlay: Option<shell::Overlay>,
+    current_game_id: Option<&str>,
+    keymap_profiles: &content::KeymapProfilesFile,
+    active_profile: &str,
+) -> KeyEvent {
+    let Some(pressed_binding) = normalize_key_event_binding(key) else {
+        return key;
+    };
+    let actions = keymap_actions_for_context(route, overlay);
+
+    for action in actions {
+        let Some(configured) = resolved_binding_for_action(
+            action,
+            keymap_profiles,
+            active_profile,
+            route,
+            current_game_id,
+        ) else {
+            continue;
+        };
+        if configured.eq_ignore_ascii_case(&pressed_binding) {
+            if let Some(mapped) = canonical_key_for_action(action) {
+                return mapped;
+            }
+            return key;
+        }
+    }
+
+    for action in actions {
+        let Some(canonical_binding) = canonical_binding_for_action(action) else {
+            continue;
+        };
+        if !canonical_binding.eq_ignore_ascii_case(&pressed_binding) {
+            continue;
+        }
+        if let Some(configured) = resolved_binding_for_action(
+            action,
+            keymap_profiles,
+            active_profile,
+            route,
+            current_game_id,
+        ) && !configured.eq_ignore_ascii_case(canonical_binding)
+        {
+            return KeyEvent::new(KeyCode::Null, KeyModifiers::empty());
+        }
+    }
+
+    key
+}
+
+fn clipboard_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .with_context(|| "failed to launch pbcopy")?;
+        if let Some(stdin) = &mut child.stdin {
+            stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(anyhow!("pbcopy exited with status {status}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for cmd in [
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("wl-copy", vec![]),
+        ] {
+            let mut child = match Command::new(cmd.0)
+                .args(&cmd.1)
+                .stdin(Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(_) => continue,
+            };
+            if let Some(stdin) = &mut child.stdin {
+                stdin.write_all(text.as_bytes())?;
+            }
+            let status = child.wait()?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        return Err(anyhow!(
+            "no supported clipboard tool found (xclip or wl-copy)"
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut child = Command::new("cmd")
+            .args(["/C", "clip"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .with_context(|| "failed to launch clip")?;
+        if let Some(stdin) = &mut child.stdin {
+            stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err(anyhow!("clip exited with status {status}"));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = text;
+        Err(anyhow!("clipboard is not supported on this platform"))
+    }
+}
+
 fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode> {
     let args = args.into_iter().collect::<Vec<_>>();
 
@@ -585,11 +1129,16 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             println!("  dark-forest --rollback <id>");
             println!("  dark-forest --verify <id>");
             println!("  dark-forest --remove <id>");
+            println!("  dark-forest --reinstall <id>");
             println!("  dark-forest --registry-list");
             println!("  dark-forest --registry-add <locator>");
             println!("  dark-forest --registry-remove <locator>");
             println!("  dark-forest --permissions-list [<game_id>]");
             println!("  dark-forest --permissions-revoke <game_id> [--capability <cap>]");
+            println!(
+                "  dark-forest --publisher-key-list | --publisher-key-add <publisher_id> <public_key_base64> | --publisher-key-remove <publisher_id>"
+            );
+            println!("  dark-forest --keymap-export <path> | --keymap-import <path>");
             println!(
                 "  dark-forest --init-template <game_dir> [--id <game_id>] [--name <name>] [--author <author>] [--version <semver>]"
             );
@@ -598,6 +1147,9 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             );
             println!(
                 "  dark-forest --verify-artifact <artifact.tar.gz> [--metadata <metadata.json>]"
+            );
+            println!(
+                "  dark-forest --keygen <publisher_id> --out-dir <dir> | --sign-artifact <artifact.tar.gz> --publisher-id <publisher_id> --private-key <file.pk8> [--metadata <metadata.json>] [--signature-out <file.sig>]"
             );
             println!(
                 "  dark-forest --publish <artifact.tar.gz> --index <locator> [--metadata <metadata.json>] [--dry-run] [--replace]"
@@ -705,6 +1257,14 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
                 game_id: args[1].clone(),
             }))
         }
+        "--reinstall" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--reinstall requires exactly one game id"));
+            }
+            Ok(LaunchMode::Operation(ContentOperation::Reinstall {
+                game_id: args[1].clone(),
+            }))
+        }
         "--registry-list" => {
             if args.len() != 1 {
                 return Err(anyhow!("--registry-list takes no additional arguments"));
@@ -767,6 +1327,130 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
             Ok(LaunchMode::Permissions(PermissionsCommand::Revoke {
                 game_id,
                 capability,
+            }))
+        }
+        "--publisher-key-list" => {
+            if args.len() != 1 {
+                return Err(anyhow!(
+                    "--publisher-key-list takes no additional arguments"
+                ));
+            }
+            Ok(LaunchMode::PublisherKeys(PublisherKeysCommand::List))
+        }
+        "--publisher-key-add" => {
+            if args.len() != 3 {
+                return Err(anyhow!(
+                    "--publisher-key-add requires <publisher_id> <public_key_base64>"
+                ));
+            }
+            Ok(LaunchMode::PublisherKeys(PublisherKeysCommand::Add {
+                publisher_id: args[1].clone(),
+                public_key_base64: args[2].clone(),
+            }))
+        }
+        "--publisher-key-remove" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--publisher-key-remove requires <publisher_id>"));
+            }
+            Ok(LaunchMode::PublisherKeys(PublisherKeysCommand::Remove {
+                publisher_id: args[1].clone(),
+            }))
+        }
+        "--keymap-export" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--keymap-export requires <path>"));
+            }
+            Ok(LaunchMode::Keymap(KeymapCommand::Export {
+                path: PathBuf::from(&args[1]),
+            }))
+        }
+        "--keymap-import" => {
+            if args.len() != 2 {
+                return Err(anyhow!("--keymap-import requires <path>"));
+            }
+            Ok(LaunchMode::Keymap(KeymapCommand::Import {
+                path: PathBuf::from(&args[1]),
+            }))
+        }
+        "--keygen" => {
+            if args.len() < 2 {
+                return Err(anyhow!("--keygen requires <publisher_id> --out-dir <dir>"));
+            }
+            let publisher_id = args[1].clone();
+            let mut out_dir = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--out-dir" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--out-dir requires a value"));
+                        }
+                        out_dir = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    other => return Err(anyhow!("unknown argument for --keygen: {other}")),
+                }
+            }
+            Ok(LaunchMode::Creator(CreatorCommand::Keygen {
+                publisher_id,
+                out_dir: out_dir.unwrap_or_else(|| PathBuf::from(".")),
+            }))
+        }
+        "--sign-artifact" => {
+            if args.len() < 2 {
+                return Err(anyhow!(
+                    "--sign-artifact requires <artifact> --publisher-id <id> --private-key <pk8>"
+                ));
+            }
+            let artifact_path = PathBuf::from(&args[1]);
+            let mut publisher_id = None;
+            let mut private_key_path = None;
+            let mut metadata_path = None;
+            let mut signature_out = None;
+            let mut idx = 2;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--publisher-id" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--publisher-id requires a value"));
+                        }
+                        publisher_id = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--private-key" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--private-key requires a value"));
+                        }
+                        private_key_path = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--metadata" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--metadata requires a value"));
+                        }
+                        metadata_path = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--signature-out" => {
+                        if idx + 1 >= args.len() {
+                            return Err(anyhow!("--signature-out requires a value"));
+                        }
+                        signature_out = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown argument for --sign-artifact: {other}"));
+                    }
+                }
+            }
+            Ok(LaunchMode::Creator(CreatorCommand::SignArtifact {
+                artifact_path,
+                metadata_path,
+                publisher_id: publisher_id
+                    .ok_or_else(|| anyhow!("--sign-artifact requires --publisher-id <id>"))?,
+                private_key_path: private_key_path
+                    .ok_or_else(|| anyhow!("--sign-artifact requires --private-key <pk8>"))?,
+                signature_out,
             }))
         }
         "--init-template" => {
@@ -1100,6 +1784,32 @@ fn execute_creator_command(command: CreatorCommand) -> Result<CreatorCommandRepo
             })?;
             Ok(CreatorCommandReport::success_verify(outcome))
         }
+        CreatorCommand::Keygen {
+            publisher_id,
+            out_dir,
+        } => {
+            let outcome = keygen_publisher(&KeygenRequest {
+                publisher_id,
+                out_dir,
+            })?;
+            Ok(CreatorCommandReport::success_keygen(outcome))
+        }
+        CreatorCommand::SignArtifact {
+            artifact_path,
+            metadata_path,
+            publisher_id,
+            private_key_path,
+            signature_out,
+        } => {
+            let outcome = sign_artifact(&SignRequest {
+                artifact_path,
+                metadata_path,
+                publisher_id,
+                private_key_path,
+                signature_out,
+            })?;
+            Ok(CreatorCommandReport::success_sign(outcome))
+        }
         CreatorCommand::Publish {
             artifact_path,
             metadata_path,
@@ -1256,6 +1966,21 @@ fn print_creator_report(report: &CreatorCommandReport) {
     if let Some(path) = &report.template_readme_path {
         println!("template.readme_path={}", path.display());
     }
+    if let Some(path) = &report.private_key_path {
+        println!("key.private_path={}", path.display());
+    }
+    if let Some(public_key) = &report.public_key_base64 {
+        println!("key.public_base64={public_key}");
+    }
+    if let Some(fingerprint) = &report.public_key_fingerprint {
+        println!("key.fingerprint={fingerprint}");
+    }
+    if let Some(path) = &report.signature_path {
+        println!("signature.path={}", path.display());
+    }
+    if let Some(signature) = &report.signature_base64 {
+        println!("signature.base64={signature}");
+    }
 }
 
 fn execute_registry_command(
@@ -1269,8 +1994,13 @@ fn execute_registry_command(
     let mut locators = settings
         .registries
         .iter()
-        .filter(|item| item.scheme.eq_ignore_ascii_case("index"))
-        .map(|item| item.locator.clone())
+        .map(|item| {
+            if item.scheme.eq_ignore_ascii_case("index") {
+                item.locator.clone()
+            } else {
+                format!("{}://{}", item.scheme, item.locator)
+            }
+        })
         .collect::<Vec<_>>();
 
     match command {
@@ -1290,7 +2020,27 @@ fn execute_registry_command(
                 });
             }
 
-            if locators.iter().any(|entry| entry == &locator) {
+            let config = if let Some(rest) = locator.strip_prefix("github://") {
+                content::RegistryConfig {
+                    scheme: "github".to_string(),
+                    locator: rest.to_string(),
+                }
+            } else if let Some(rest) = locator.strip_prefix("index://") {
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: rest.to_string(),
+                }
+            } else {
+                content::RegistryConfig {
+                    scheme: "index".to_string(),
+                    locator: locator.clone(),
+                }
+            };
+
+            let exists = settings.registries.iter().any(|entry| {
+                entry.scheme.eq_ignore_ascii_case(&config.scheme) && entry.locator == config.locator
+            });
+            if exists {
                 return Ok(RegistryCommandReport {
                     command: "registry-add".to_string(),
                     success: true,
@@ -1299,13 +2049,20 @@ fn execute_registry_command(
                 });
             }
 
-            settings.registries.push(content::RegistryConfig {
-                scheme: "index".to_string(),
-                locator: locator.clone(),
-            });
+            settings.registries.push(config);
             store.save_settings(&settings)?;
 
-            locators.push(locator.clone());
+            locators = settings
+                .registries
+                .iter()
+                .map(|item| {
+                    if item.scheme.eq_ignore_ascii_case("index") {
+                        item.locator.clone()
+                    } else {
+                        format!("{}://{}", item.scheme, item.locator)
+                    }
+                })
+                .collect::<Vec<_>>();
             Ok(RegistryCommandReport {
                 command: "registry-add".to_string(),
                 success: true,
@@ -1314,9 +2071,18 @@ fn execute_registry_command(
             })
         }
         RegistryCommand::Remove { locator } => {
+            let (remove_scheme, remove_locator) =
+                if let Some(rest) = locator.strip_prefix("github://") {
+                    ("github".to_string(), rest.to_string())
+                } else if let Some(rest) = locator.strip_prefix("index://") {
+                    ("index".to_string(), rest.to_string())
+                } else {
+                    ("index".to_string(), locator.clone())
+                };
             let before_len = settings.registries.len();
             settings.registries.retain(|item| {
-                !(item.scheme.eq_ignore_ascii_case("index") && item.locator == locator)
+                !(item.scheme.eq_ignore_ascii_case(&remove_scheme)
+                    && item.locator == remove_locator)
             });
 
             if settings.registries.len() == before_len {
@@ -1332,8 +2098,13 @@ fn execute_registry_command(
             locators = settings
                 .registries
                 .iter()
-                .filter(|item| item.scheme.eq_ignore_ascii_case("index"))
-                .map(|item| item.locator.clone())
+                .map(|item| {
+                    if item.scheme.eq_ignore_ascii_case("index") {
+                        item.locator.clone()
+                    } else {
+                        format!("{}://{}", item.scheme, item.locator)
+                    }
+                })
                 .collect::<Vec<_>>();
 
             Ok(RegistryCommandReport {
@@ -1526,6 +2297,146 @@ fn run_permissions_cli(command: PermissionsCommand) -> Result<()> {
     }
 }
 
+fn execute_publisher_keys_command(
+    root: PathBuf,
+    command: PublisherKeysCommand,
+) -> Result<PublisherKeysCommandReport> {
+    let store = JsonContentStore::new(root);
+    store.ensure_layout()?;
+    let mut keyring = store.load_publisher_keyring()?;
+
+    match command {
+        PublisherKeysCommand::List => {
+            let keys = keyring
+                .keys
+                .iter()
+                .map(|(id, record)| {
+                    format!(
+                        "{id}|fingerprint={}|added_at={}",
+                        record.fingerprint_sha256, record.added_at
+                    )
+                })
+                .collect::<Vec<_>>();
+            Ok(PublisherKeysCommandReport {
+                command: "publisher-key-list".to_string(),
+                success: true,
+                message: format!("{} publisher keys", keys.len()),
+                keys,
+            })
+        }
+        PublisherKeysCommand::Add {
+            publisher_id,
+            public_key_base64,
+        } => {
+            let fingerprint = public_key_fingerprint_from_base64(&public_key_base64)?;
+            keyring.keys.insert(
+                publisher_id.clone(),
+                content::PublisherKeyRecord {
+                    publisher_id: publisher_id.clone(),
+                    public_key_base64,
+                    fingerprint_sha256: fingerprint,
+                    added_at: Utc::now(),
+                },
+            );
+            store.save_publisher_keyring(&keyring)?;
+            Ok(PublisherKeysCommandReport {
+                command: "publisher-key-add".to_string(),
+                success: true,
+                message: format!("publisher key added: {publisher_id}"),
+                keys: keyring.keys.keys().cloned().collect(),
+            })
+        }
+        PublisherKeysCommand::Remove { publisher_id } => {
+            if keyring.keys.remove(&publisher_id).is_none() {
+                return Ok(PublisherKeysCommandReport {
+                    command: "publisher-key-remove".to_string(),
+                    success: false,
+                    message: format!("publisher key not found: {publisher_id}"),
+                    keys: keyring.keys.keys().cloned().collect(),
+                });
+            }
+            store.save_publisher_keyring(&keyring)?;
+            Ok(PublisherKeysCommandReport {
+                command: "publisher-key-remove".to_string(),
+                success: true,
+                message: format!("publisher key removed: {publisher_id}"),
+                keys: keyring.keys.keys().cloned().collect(),
+            })
+        }
+    }
+}
+
+fn run_publisher_keys_cli(command: PublisherKeysCommand) -> Result<()> {
+    let store = JsonContentStore::create_with_default_root()?;
+    let report = execute_publisher_keys_command(store.root().to_path_buf(), command)?;
+    println!("command={}", report.command);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+    println!("key_count={}", report.keys.len());
+    for (idx, key) in report.keys.iter().enumerate() {
+        println!("key[{idx}]={key}");
+    }
+
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
+fn execute_keymap_command(root: PathBuf, command: KeymapCommand) -> Result<KeymapCommandReport> {
+    let store = JsonContentStore::new(root);
+    store.ensure_layout()?;
+
+    match command {
+        KeymapCommand::Export { path } => {
+            let profiles = store.load_keymap_profiles()?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, serde_json::to_vec_pretty(&profiles)?)?;
+            Ok(KeymapCommandReport {
+                command: "keymap-export".to_string(),
+                success: true,
+                message: "keymap profiles exported".to_string(),
+                path,
+                active_profile: Some(profiles.active_profile),
+            })
+        }
+        KeymapCommand::Import { path } => {
+            let raw = fs::read(&path)
+                .with_context(|| format!("failed to read keymap import {}", path.display()))?;
+            let profiles: content::KeymapProfilesFile = serde_json::from_slice(&raw)
+                .with_context(|| format!("failed to parse keymap import {}", path.display()))?;
+            store.save_keymap_profiles(&profiles)?;
+            Ok(KeymapCommandReport {
+                command: "keymap-import".to_string(),
+                success: true,
+                message: "keymap profiles imported".to_string(),
+                path,
+                active_profile: Some(profiles.active_profile),
+            })
+        }
+    }
+}
+
+fn run_keymap_cli(command: KeymapCommand) -> Result<()> {
+    let store = JsonContentStore::create_with_default_root()?;
+    let report = execute_keymap_command(store.root().to_path_buf(), command)?;
+    println!("command={}", report.command);
+    println!("success={}", report.success);
+    println!("message={}", report.message);
+    println!("path={}", report.path.display());
+    if let Some(active) = &report.active_profile {
+        println!("active_profile={active}");
+    }
+    if report.success {
+        Ok(())
+    } else {
+        Err(anyhow!(report.message))
+    }
+}
+
 fn latest_played_game_id(history: &content::PlayHistoryMap) -> Option<String> {
     history
         .iter()
@@ -1547,6 +2458,11 @@ fn ensure_builtin_installed(
                 current_version: "0.1.0".to_string(),
                 installed_versions: vec!["0.1.0".to_string()],
                 version_checksums: BTreeMap::new(),
+                artifact_uri: None,
+                checksum_sha256: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             });
         }
     }
@@ -1569,6 +2485,19 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
             description: format!("Installed from {}", record.source),
             tags: vec!["installed".to_string()],
             controls_summary: Vec::new(),
+            source: record.source.clone(),
+            verified: record.publisher_id.is_some(),
+            publisher_id: record.publisher_id.clone(),
+            collections: Vec::new(),
+            compatibility: Some("host_api=unknown, permissions=unknown".to_string()),
+            permissions_summary: manifest
+                .permissions
+                .iter()
+                .map(|grant| capability_label(grant.capability).to_string())
+                .collect(),
+            host_api_range: manifest.host_api,
+            changelog_url: manifest.changelog_url,
+            homepage: manifest.homepage,
         };
     }
 
@@ -1578,6 +2507,15 @@ fn read_installed_game_item(root: &Path, record: &content::InstalledRecord) -> s
         description: format!("Installed from {}", record.source),
         tags: vec!["installed".to_string()],
         controls_summary: Vec::new(),
+        source: record.source.clone(),
+        verified: record.publisher_id.is_some(),
+        publisher_id: record.publisher_id.clone(),
+        collections: Vec::new(),
+        compatibility: Some("host_api=unknown, permissions=unknown".to_string()),
+        permissions_summary: Vec::new(),
+        host_api_range: "^0.1".to_string(),
+        changelog_url: None,
+        homepage: None,
     }
 }
 
@@ -1608,7 +2546,7 @@ fn create_game_instance(
     game_id: &str,
     seed: u64,
 ) -> Result<Box<dyn runtime::Game + Send>> {
-    create_game_instance_with_enforcer(root, installed, game_id, seed, None)
+    create_game_instance_with_enforcer(root, installed, game_id, seed, None, false)
 }
 
 fn create_game_instance_with_enforcer(
@@ -1617,6 +2555,7 @@ fn create_game_instance_with_enforcer(
     game_id: &str,
     seed: u64,
     enforcer: Option<std::sync::Arc<dyn CapabilityEnforcer>>,
+    allow_process_plugins: bool,
 ) -> Result<Box<dyn runtime::Game + Send>> {
     if let Some(record) = installed.installed.iter().find(|item| item.id == game_id) {
         if record.source.starts_with("builtin://") {
@@ -1642,7 +2581,12 @@ fn create_game_instance_with_enforcer(
             ));
         }
 
-        validate_entry_type(parsed.entry_type, source_scheme, source_scheme == "builtin")?;
+        if !(allow_process_plugins
+            && parsed.entry_type == plugin_host::EntryType::Process
+            && source_scheme != "builtin")
+        {
+            validate_entry_type(parsed.entry_type, source_scheme, source_scheme == "builtin")?;
+        }
 
         return match parsed.entry_type {
             plugin_host::EntryType::Wasm => {
@@ -1659,7 +2603,13 @@ fn create_game_instance_with_enforcer(
                 "third-party native entry_type is not allowed by default policy"
             )),
             plugin_host::EntryType::Process => {
-                Err(anyhow!("process entry_type is disabled by default"))
+                if allow_process_plugins {
+                    Err(anyhow!(
+                        "process plugins are enabled but process runtime host is not implemented yet"
+                    ))
+                } else {
+                    Err(anyhow!("process entry_type is disabled by default"))
+                }
             }
         };
     }
@@ -1674,14 +2624,6 @@ fn load_marketplace_catalog(
     let mut snapshot = MarketplaceCatalogSnapshot::default();
 
     for registry in &settings.registries {
-        if !registry.scheme.eq_ignore_ascii_case("index") {
-            snapshot.warnings.push(format!(
-                "registry {} has unsupported scheme '{}'",
-                registry.locator, registry.scheme
-            ));
-            continue;
-        }
-
         if registry.locator.trim().is_empty() {
             snapshot
                 .warnings
@@ -1689,34 +2631,62 @@ fn load_marketplace_catalog(
             continue;
         }
 
-        let provider = IndexRegistryProvider::new(registry.locator.clone(), cache_root.clone());
+        let provider_locator = if registry.scheme.eq_ignore_ascii_case("index") {
+            registry.locator.clone()
+        } else {
+            format!("{}://{}", registry.scheme, registry.locator)
+        };
+        let provider = match provider_from_locator(&provider_locator, cache_root.clone()) {
+            Ok(provider) => provider,
+            Err(err) => {
+                snapshot.warnings.push(format!(
+                    "registry {} parse failed: {}",
+                    provider_locator, err
+                ));
+                continue;
+            }
+        };
         match provider.list() {
             Ok(listings) => {
                 for listing in listings {
                     if let Some(previous) = snapshot.install_locators.get(&listing.id) {
                         snapshot.warnings.push(format!(
                             "duplicate marketplace id '{}' from {} ignored (already provided by {})",
-                            listing.id, registry.locator, previous
+                            listing.id, provider_locator, previous
                         ));
                         continue;
                     }
 
                     snapshot
                         .install_locators
-                        .insert(listing.id.clone(), registry.locator.clone());
+                        .insert(listing.id.clone(), provider_locator.clone());
                     snapshot.games.push(shell::GameItem {
                         id: listing.id,
                         name: listing.name,
                         description: listing.description,
                         tags: listing.tags,
                         controls_summary: listing.controls_summary,
+                        source: format!("{}://{}", listing.source.scheme, listing.source.locator),
+                        verified: listing.verified,
+                        publisher_id: listing.publisher_id,
+                        collections: listing.collections,
+                        compatibility: listing.compatibility.map(|badge| {
+                            format!(
+                                "host_api={}, permissions={}",
+                                badge.host_api, badge.permissions
+                            )
+                        }),
+                        permissions_summary: listing.permissions_summary,
+                        host_api_range: listing.host_api_range,
+                        changelog_url: None,
+                        homepage: None,
                     });
                 }
             }
             Err(err) => {
                 snapshot.warnings.push(format!(
                     "registry {} load failed: {}",
-                    registry.locator, err
+                    provider_locator, err
                 ));
             }
         }
@@ -1761,9 +2731,73 @@ fn install_from_index(
     game_id: &str,
     version: Option<String>,
 ) -> Result<content::InstallOutcome> {
-    let provider = IndexRegistryProvider::new(locator.to_string(), store.cache_dir_path());
+    let provider = provider_from_locator(locator, store.cache_dir_path())?;
     let artifact = provider.resolve(game_id, version.as_deref())?;
-    let archive_path = provider.fetch_artifact_to_cache(&artifact)?;
+    let artifact_uri = artifact
+        .artifact_uri
+        .clone()
+        .ok_or_else(|| anyhow!("artifact URI missing for {}", artifact.id))?;
+    let artifact_bytes = fetch_bytes(&artifact_uri)?;
+    let archive_path = store
+        .cache_dir_path()
+        .join("artifacts")
+        .join(format!("{}-{}.tar.gz", artifact.id, artifact.version));
+    if let Some(parent) = archive_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&archive_path, &artifact_bytes)?;
+
+    let artifact_sha256 = artifact
+        .artifact_sha256
+        .clone()
+        .ok_or_else(|| anyhow!("artifact_sha256 is required for third-party install"))?;
+    let publisher_id = artifact
+        .publisher_id
+        .clone()
+        .ok_or_else(|| anyhow!("publisher_id is required for third-party install"))?;
+    let signature_uri = artifact
+        .signature_uri
+        .clone()
+        .ok_or_else(|| anyhow!("signature_uri is required for third-party install"))?;
+    let keyring = store.load_publisher_keyring()?;
+    let publisher_key = keyring
+        .keys
+        .get(&publisher_id)
+        .ok_or_else(|| anyhow!("publisher key not trusted: {publisher_id}"))?;
+    if let Some(expected_fingerprint) = &artifact.signature_fingerprint
+        && expected_fingerprint != &publisher_key.fingerprint_sha256
+    {
+        return Err(anyhow!(
+            "publisher fingerprint mismatch for {publisher_id} (expected {}, trusted {})",
+            expected_fingerprint,
+            publisher_key.fingerprint_sha256
+        ));
+    }
+    let signature = fetch_text(&signature_uri)?.trim().to_string();
+    let artifact_file = archive_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow!("artifact path has no file name {}", archive_path.display()))?;
+    let metadata = creator::PackageMetadata {
+        schema_version: creator::CREATOR_METADATA_SCHEMA_VERSION,
+        game_id: artifact.id.clone(),
+        version: artifact.version.clone(),
+        entry_type: match artifact.entry_type {
+            plugin_host::EntryType::Native => "native".to_string(),
+            plugin_host::EntryType::Wasm => "wasm".to_string(),
+            plugin_host::EntryType::Process => "process".to_string(),
+        },
+        host_api: "^0.1".to_string(),
+        artifact_file,
+        artifact_sha256: artifact_sha256.clone(),
+        artifact_size_bytes: u64::try_from(artifact_bytes.len()).unwrap_or(0),
+        generated_at: Utc::now(),
+        signature_alg: Some("ed25519".to_string()),
+        signature: Some(signature),
+        publisher_id: Some(publisher_id.clone()),
+        public_key_fingerprint: Some(publisher_key.fingerprint_sha256.clone()),
+    };
+    verify_signature(&metadata, &publisher_key.public_key_base64)?;
 
     let unpack_dir = store.root().join("tmp").join(format!(
         "index-install-{}-{}-{}",
@@ -1782,11 +2816,21 @@ fn install_from_index(
     let result = store.install_from_directory(&content::InstallRequest {
         game_id: game_id.to_string(),
         version: artifact.version,
-        source: format!("index://{locator}"),
+        source: if locator.starts_with("github://") {
+            locator.to_string()
+        } else {
+            format!("index://{locator}")
+        },
         artifact_dir: artifact_root,
         // Registry provider already verifies artifact tarball checksum before unpacking.
         // `install_from_directory` computes a directory hash, so avoid cross-format mismatch.
         expected_sha256: None,
+        artifact_uri: Some(artifact_uri),
+        publisher_id: Some(publisher_id),
+        signature_fingerprint: artifact
+            .signature_fingerprint
+            .or_else(|| Some(publisher_key.fingerprint_sha256.clone())),
+        verified_at: Some(Utc::now()),
     });
 
     let _ = fs::remove_dir_all(&unpack_dir);
@@ -1813,6 +2857,10 @@ fn execute_content_operation(
                     source: source.unwrap_or_else(|| "local://manual".to_string()),
                     artifact_dir,
                     expected_sha256: None,
+                    artifact_uri: None,
+                    publisher_id: None,
+                    signature_fingerprint: None,
+                    verified_at: None,
                 })
                 .map_err(|err| anyhow!(err.to_string()))?;
 
@@ -1845,13 +2893,17 @@ fn execute_content_operation(
                 .find(|item| item.id == game_id)
                 .ok_or_else(|| anyhow!("game is not installed: {game_id}"))?;
 
-            let Some(locator) = record.source.strip_prefix("index://") else {
+            let locator = if let Some(locator) = record.source.strip_prefix("index://") {
+                locator.to_string()
+            } else if record.source.starts_with("github://") {
+                record.source.clone()
+            } else {
                 return Err(anyhow!(
-                    "update is currently supported only for index:// sources"
+                    "update is currently supported only for index:// and github:// sources"
                 ));
             };
 
-            let provider = IndexRegistryProvider::new(locator.to_string(), store.cache_dir_path());
+            let provider = provider_from_locator(&locator, store.cache_dir_path())?;
             let latest = provider.resolve(&game_id, None)?;
             if latest.version == record.current_version {
                 return Ok(OperationReport::success(
@@ -1861,7 +2913,7 @@ fn execute_content_operation(
                 ));
             }
 
-            let outcome = install_from_index(&store, locator, &game_id, Some(latest.version))?;
+            let outcome = install_from_index(&store, &locator, &game_id, Some(latest.version))?;
             Ok(OperationReport::success(
                 &operation,
                 format!("updated {} to {}", outcome.game_id, outcome.version),
@@ -1912,6 +2964,51 @@ fn execute_content_operation(
             Ok(OperationReport::success(
                 &operation,
                 format!("removed {}@{}", outcome.game_id, outcome.removed_version),
+                true,
+            ))
+        }
+        ContentOperation::Reinstall { game_id } => {
+            let installed = store.load_installed()?;
+            let record = installed
+                .installed
+                .iter()
+                .find(|item| item.id == game_id)
+                .ok_or_else(|| anyhow!("game is not installed: {game_id}"))?;
+            let artifact_uri = record
+                .artifact_uri
+                .as_ref()
+                .ok_or_else(|| anyhow!("no artifact provenance available for {game_id}"))?;
+            let bytes = fetch_bytes(artifact_uri)?;
+            let unpack_dir = store.root().join("tmp").join(format!(
+                "reinstall-{}-{}",
+                game_id,
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            if unpack_dir.exists() {
+                let _ = fs::remove_dir_all(&unpack_dir);
+            }
+            fs::create_dir_all(&unpack_dir)?;
+            let archive_path = unpack_dir.join("artifact.tar.gz");
+            fs::write(&archive_path, &bytes)?;
+            unpack_tarball_to_dir(&archive_path, &unpack_dir)?;
+            let artifact_root = select_unpacked_artifact_root(&unpack_dir)?;
+            let outcome = store
+                .install_from_directory(&content::InstallRequest {
+                    game_id: game_id.clone(),
+                    version: record.current_version.clone(),
+                    source: record.source.clone(),
+                    artifact_dir: artifact_root,
+                    expected_sha256: record.checksum_sha256.clone(),
+                    artifact_uri: Some(artifact_uri.clone()),
+                    publisher_id: record.publisher_id.clone(),
+                    signature_fingerprint: record.signature_fingerprint.clone(),
+                    verified_at: Some(Utc::now()),
+                })
+                .map_err(|err| anyhow!(err.to_string()))?;
+            let _ = fs::remove_dir_all(&unpack_dir);
+            Ok(OperationReport::success(
+                &operation,
+                format!("reinstalled {}@{}", outcome.game_id, outcome.version),
                 true,
             ))
         }
@@ -1971,12 +3068,45 @@ impl AppModel {
                 description: listing.description,
                 tags: listing.tags,
                 controls_summary: listing.controls_summary,
+                source: format!("{}://{}", listing.source.scheme, listing.source.locator),
+                verified: listing.verified,
+                publisher_id: listing.publisher_id,
+                collections: listing.collections,
+                compatibility: listing.compatibility.map(|badge| {
+                    format!(
+                        "host_api={}, permissions={}",
+                        badge.host_api, badge.permissions
+                    )
+                }),
+                permissions_summary: listing.permissions_summary,
+                host_api_range: listing.host_api_range,
+                changelog_url: None,
+                homepage: None,
             })
             .collect::<Vec<_>>();
 
         let store = JsonContentStore::create_with_default_root()?;
         store.ensure_layout()?;
-        let settings = store.load_settings()?;
+        let mut settings = store.load_settings()?;
+        let mut keymap_profiles = store.load_keymap_profiles()?;
+        if !keymap_profiles
+            .profiles
+            .contains_key(&settings.keymap_active_profile)
+        {
+            settings.keymap_active_profile = if keymap_profiles
+                .profiles
+                .contains_key(&keymap_profiles.active_profile)
+            {
+                keymap_profiles.active_profile.clone()
+            } else {
+                "default".to_string()
+            };
+            let _ = store.save_settings(&settings);
+        }
+        if keymap_profiles.active_profile != settings.keymap_active_profile {
+            keymap_profiles.active_profile = settings.keymap_active_profile.clone();
+            let _ = store.save_keymap_profiles(&keymap_profiles);
+        }
         let play_history = store.load_play_history()?;
         let installed = ensure_builtin_installed(store.load_installed()?, &builtin_games);
         let permissions = store.load_permissions()?;
@@ -2005,12 +3135,25 @@ impl AppModel {
         let mut shell = ShellState::new(builtin_games.clone());
         shell.continue_game_id = latest_played_game_id(&play_history);
         shell.performance_mode = settings.performance_mode.clone();
+        shell.filter_verified_only = settings.registry_filters.verified_only;
+        shell.filter_source = settings.registry_filters.source.clone();
+        shell.filter_collection = settings.registry_filters.collection.clone();
+        shell.keymap_active_profile = settings.keymap_active_profile.clone();
+        shell.prompt_sensitive_only = settings.security_toggles.prompt_sensitive_only;
+        shell.allow_process_plugins = settings.allow_process_plugins;
+        shell.allow_error_clipboard_copy = settings.allow_error_clipboard_copy;
+        shell.registry_locators = settings
+            .registries
+            .iter()
+            .map(|registry| format!("{}://{}", registry.scheme, registry.locator))
+            .collect();
 
         let mut model = Self {
             shell,
             runner,
             store,
             settings,
+            keymap_profiles,
             play_history,
             installed,
             shared_permissions: std::sync::Arc::new(std::sync::Mutex::new(permissions.clone())),
@@ -2023,6 +3166,7 @@ impl AppModel {
             paused_for_permission_prompt: false,
             best_scores,
             current_game_id: None,
+            pending_process_launch_game_id: None,
             current_game_seed: None,
             current_game_started_at: None,
             seed_counter: Utc::now().timestamp() as u64,
@@ -2035,6 +3179,8 @@ impl AppModel {
 
         model.refresh_game_catalog();
         model.refresh_permission_audit_entries();
+        model.update_shell_settings_view();
+        model.update_shell_diagnostics_lines();
         Ok(model)
     }
 
@@ -2094,6 +3240,47 @@ impl AppModel {
             }
         }
         self.shell.set_permission_audit_entries(entries);
+    }
+
+    fn update_shell_settings_view(&mut self) {
+        self.shell.performance_mode = self.settings.performance_mode.clone();
+        self.shell.keymap_active_profile = self.settings.keymap_active_profile.clone();
+        self.shell.prompt_sensitive_only = self.settings.security_toggles.prompt_sensitive_only;
+        self.shell.allow_process_plugins = self.settings.allow_process_plugins;
+        self.shell.allow_error_clipboard_copy = self.settings.allow_error_clipboard_copy;
+        self.shell.registry_locators = self
+            .settings
+            .registries
+            .iter()
+            .map(|registry| format!("{}://{}", registry.scheme, registry.locator))
+            .collect();
+    }
+
+    fn update_shell_diagnostics_lines(&mut self) {
+        self.shell.diagnostics_lines = vec![
+            format!("Runner mode: {:?}", self.runner.perf_mode()),
+            format!("Target FPS: {}", self.runner.auto_target_fps()),
+            format!("Avg render ms: {:.2}", self.runner.average_render_ms()),
+            format!(
+                "Permissions tracked: {}",
+                self.permissions
+                    .grants
+                    .values()
+                    .map(std::vec::Vec::len)
+                    .sum::<usize>()
+            ),
+        ];
+    }
+
+    fn remap_key_event_for_shell(&self, key: KeyEvent) -> KeyEvent {
+        remap_key_event_with_profiles(
+            key,
+            &self.shell.route,
+            self.shell.overlay,
+            self.current_game_id.as_deref(),
+            &self.keymap_profiles,
+            &self.settings.keymap_active_profile,
+        )
     }
 
     fn maybe_show_permission_prompt(&mut self) {
@@ -2262,7 +3449,128 @@ impl AppModel {
         };
 
         self.runner.set_perf_mode(mode);
-        self.shell.performance_mode = self.settings.performance_mode.clone();
+        self.update_shell_settings_view();
+        if let Err(err) = self.store.save_settings(&self.settings) {
+            self.shell
+                .set_error(format!("failed to persist settings change: {err}"));
+        }
+    }
+
+    fn cycle_keymap_profile(&mut self) {
+        let mut names = self
+            .keymap_profiles
+            .profiles
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            self.keymap_profiles = content::KeymapProfilesFile::default();
+            names = self
+                .keymap_profiles
+                .profiles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+        }
+        names.sort();
+        let current = self.settings.keymap_active_profile.clone();
+        let current_idx = names.iter().position(|name| name == &current).unwrap_or(0);
+        let next = names[(current_idx + 1) % names.len()].clone();
+        self.settings.keymap_active_profile = next.clone();
+        self.keymap_profiles.active_profile = next.clone();
+        self.update_shell_settings_view();
+
+        if let Err(err) = self.store.save_settings(&self.settings) {
+            self.shell
+                .set_error(format!("failed to persist keymap profile selection: {err}"));
+            return;
+        }
+        if let Err(err) = self.store.save_keymap_profiles(&self.keymap_profiles) {
+            self.shell
+                .set_error(format!("failed to persist keymap profiles: {err}"));
+            return;
+        }
+
+        self.shell
+            .push_notification(format!("Active keymap profile: {next}"));
+    }
+
+    fn toggle_prompt_sensitive_only(&mut self) {
+        self.settings.security_toggles.prompt_sensitive_only =
+            !self.settings.security_toggles.prompt_sensitive_only;
+        self.update_shell_settings_view();
+        if let Err(err) = self.store.save_settings(&self.settings) {
+            self.shell
+                .set_error(format!("failed to persist settings change: {err}"));
+        }
+    }
+
+    fn toggle_allow_process_plugins(&mut self) {
+        self.settings.allow_process_plugins = !self.settings.allow_process_plugins;
+        self.update_shell_settings_view();
+        if let Err(err) = self.store.save_settings(&self.settings) {
+            self.shell
+                .set_error(format!("failed to persist settings change: {err}"));
+        }
+    }
+
+    fn toggle_allow_error_clipboard_copy(&mut self) {
+        self.settings.allow_error_clipboard_copy = !self.settings.allow_error_clipboard_copy;
+        self.update_shell_settings_view();
+        if let Err(err) = self.store.save_settings(&self.settings) {
+            self.shell
+                .set_error(format!("failed to persist settings change: {err}"));
+        }
+    }
+
+    fn game_requires_process_plugin_warning(&self, game_id: &str) -> bool {
+        if !self.settings.allow_process_plugins {
+            return false;
+        }
+        let Some(record) = self
+            .installed
+            .installed
+            .iter()
+            .find(|item| item.id == game_id)
+        else {
+            return false;
+        };
+        if record.source.starts_with("builtin://") {
+            return false;
+        }
+        let manifest_path = self
+            .store
+            .root()
+            .join("games")
+            .join(game_id)
+            .join(record.current_version.as_str())
+            .join("game.json");
+        let Ok(raw) = fs::read_to_string(manifest_path) else {
+            return false;
+        };
+        let Ok(parsed) = parse_manifest(&raw) else {
+            return false;
+        };
+        parsed.entry_type == plugin_host::EntryType::Process
+    }
+
+    fn queue_process_plugin_warning(&mut self, game_id: String) {
+        self.pending_process_launch_game_id = Some(game_id.clone());
+        self.shell.set_process_plugin_prompt_game(Some(game_id));
+        self.shell.overlay = Some(shell::Overlay::ProcessPluginWarning);
+    }
+
+    fn resolve_process_plugin_launch(&mut self, allow: bool) {
+        let pending = self.pending_process_launch_game_id.take();
+        self.shell.set_process_plugin_prompt_game(None);
+        if let Some(game_id) = pending {
+            if allow {
+                self.start_game(&game_id);
+            } else {
+                self.shell
+                    .push_notification(format!("Canceled process-plugin launch for {game_id}"));
+            }
+        }
     }
 
     fn start_game(&mut self, game_id: &str) {
@@ -2284,6 +3592,7 @@ impl AppModel {
             game_id,
             seed,
             Some(enforcer),
+            self.settings.allow_process_plugins,
         ) {
             Ok(game) => {
                 if let Err(err) = self.runner.start(game, seed) {
@@ -2381,6 +3690,26 @@ impl AppModel {
             ShellCommand::TogglePause => self.runner.toggle_pause(),
             ShellCommand::SetOverlay(overlay) => self.shell.overlay = overlay,
             ShellCommand::CyclePerformance => self.cycle_performance_mode(),
+            ShellCommand::CycleKeymapProfile => self.cycle_keymap_profile(),
+            ShellCommand::TogglePromptSensitiveOnly => self.toggle_prompt_sensitive_only(),
+            ShellCommand::ToggleAllowProcessPlugins => self.toggle_allow_process_plugins(),
+            ShellCommand::ToggleAllowErrorClipboardCopy => self.toggle_allow_error_clipboard_copy(),
+            ShellCommand::CopyLastErrorToClipboard => {
+                if !self.settings.allow_error_clipboard_copy {
+                    self.shell
+                        .set_error("clipboard copy is disabled in settings".to_string());
+                } else if !clipboard_supported() {
+                    self.shell
+                        .set_error("clipboard is not supported on this platform".to_string());
+                } else if let Some(error) = self.shell.last_error.clone() {
+                    if let Err(err) = copy_to_clipboard(&error) {
+                        self.shell
+                            .set_error(format!("failed to copy error to clipboard: {err}"));
+                    } else {
+                        self.shell.push_notification("Copied error to clipboard.");
+                    }
+                }
+            }
             ShellCommand::InstallSelected(_)
             | ShellCommand::UpdateInstalled(_)
             | ShellCommand::RollbackInstalled(_)
@@ -2388,6 +3717,8 @@ impl AppModel {
             | ShellCommand::RemoveInstalled(_)
             | ShellCommand::RevokePermission { .. }
             | ShellCommand::ResolvePermissionPrompt(_)
+            | ShellCommand::ResolveHotReloadPrompt { .. }
+            | ShellCommand::ResolveProcessPluginLaunch { .. }
             | ShellCommand::None => {}
         }
 
@@ -2427,8 +3758,14 @@ impl AppModel {
             if report.installed_changed {
                 let active_changed = self.refresh_installed_state();
                 if active_changed {
-                    self.shell
-                        .push_notification("Active game content changed. Restart to apply.");
+                    if self.current_game_id.is_some() {
+                        self.shell
+                            .set_hot_reload_prompt_game(self.current_game_id.clone());
+                        self.shell.overlay = Some(shell::Overlay::HotReloadPrompt);
+                    } else {
+                        self.shell
+                            .push_notification("Active game content changed. Restart to apply.");
+                    }
                 }
             }
         } else {
@@ -2552,6 +3889,8 @@ async fn main() -> Result<()> {
         LaunchMode::Operation(operation) => run_operation_cli(operation),
         LaunchMode::Registry(command) => run_registry_cli(command),
         LaunchMode::Permissions(command) => run_permissions_cli(command),
+        LaunchMode::PublisherKeys(command) => run_publisher_keys_cli(command),
+        LaunchMode::Keymap(command) => run_keymap_cli(command),
         LaunchMode::Creator(command) => run_creator_cli(command),
     }
 }
@@ -2768,9 +4107,16 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                 }
                 AppEvent::HotReloadDetected => {
                     if model.refresh_installed_state() {
-                        model.shell.push_notification(
-                            "Installed content changed. Restart active game to apply.",
-                        );
+                        if model.current_game_id.is_some() {
+                            model
+                                .shell
+                                .set_hot_reload_prompt_game(model.current_game_id.clone());
+                            model.shell.overlay = Some(shell::Overlay::HotReloadPrompt);
+                        } else {
+                            model.shell.push_notification(
+                                "Installed content changed. Restart active game to apply.",
+                            );
+                        }
                     }
                     model.refresh_permissions_state();
                 }
@@ -2797,8 +4143,9 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                             continue;
                         }
 
+                        let mapped_key = model.remap_key_event_for_shell(key);
                         let commands = model.shell.handle_key(
-                            key,
+                            mapped_key,
                             model.runner.is_running(),
                             model.runner.is_paused(),
                         );
@@ -2811,6 +4158,13 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
 
                         for command in commands {
                             match command {
+                                ShellCommand::StartGame(id) => {
+                                    if model.game_requires_process_plugin_warning(&id) {
+                                        model.queue_process_plugin_warning(id);
+                                    } else {
+                                        model.start_game(&id);
+                                    }
+                                }
                                 ShellCommand::InstallSelected(id) => {
                                     if model.installed.installed.iter().any(|item| item.id == id) {
                                         continue;
@@ -2900,6 +4254,25 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                                 ShellCommand::ResolvePermissionPrompt(action) => {
                                     model.resolve_permission_prompt(action);
                                 }
+                                ShellCommand::ResolveHotReloadPrompt { reload_now } => {
+                                    if reload_now {
+                                        if let Some(game_id) = model.current_game_id.clone() {
+                                            model.stop_game();
+                                            model.start_game(&game_id);
+                                            model.shell.push_notification(format!(
+                                                "Reloaded updated game {game_id}"
+                                            ));
+                                        }
+                                    } else if let Some(game_id) = model.current_game_id.clone() {
+                                        model.shell.push_notification(format!(
+                                            "Deferred reload for {game_id}"
+                                        ));
+                                    }
+                                    model.shell.set_hot_reload_prompt_game(None);
+                                }
+                                ShellCommand::ResolveProcessPluginLaunch { allow } => {
+                                    model.resolve_process_plugin_launch(allow);
+                                }
                                 other => {
                                     if model.handle_shell_command(other) {
                                         should_quit = true;
@@ -2928,6 +4301,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
                 },
             }
 
+            model.update_shell_diagnostics_lines();
             terminal.draw(|frame| {
                 shell::render(frame, &model.shell, &model.render_context());
             })?;
@@ -2942,7 +4316,14 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     let _ = operation_task.await;
 
     model.update_play_stats();
+    model.settings.registry_filters = content::RegistryFilters {
+        tags: model.settings.registry_filters.tags.clone(),
+        source: model.shell.filter_source.clone(),
+        verified_only: model.shell.filter_verified_only,
+        collection: model.shell.filter_collection.clone(),
+    };
     model.store.save_settings(&model.settings)?;
+    model.store.save_keymap_profiles(&model.keymap_profiles)?;
     model.store.save_play_history(&model.play_history)?;
     model.store.save_installed(&model.installed)?;
     model.store.save_permissions(&model.permissions)?;
@@ -2963,6 +4344,7 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -2971,12 +4353,14 @@ mod tests {
     use shell::{Overlay, Route, ShellCommand};
 
     use super::{
-        AppCapabilityEnforcer, ContentOperation, CreatorCommand, LaunchMode, PermissionsCommand,
-        RegistryCommand, compute_hotload_signature, create_game_instance,
-        disable_keyboard_enhancements, enable_keyboard_enhancements, execute_content_operation,
-        execute_creator_command, execute_permissions_command, execute_registry_command,
-        load_marketplace_catalog, parse_launch_mode, runner_dimensions,
-        should_auto_fullscreen_for_game, should_forward_key_to_runner, should_render_frame,
+        AppCapabilityEnforcer, ContentOperation, CreatorCommand, KeymapCommand, LaunchMode,
+        PermissionsCommand, PublisherKeysCommand, RegistryCommand, compute_hotload_signature,
+        create_game_instance, disable_keyboard_enhancements, enable_keyboard_enhancements,
+        execute_content_operation, execute_creator_command, execute_keymap_command,
+        execute_permissions_command, execute_publisher_keys_command, execute_registry_command,
+        load_marketplace_catalog, parse_launch_mode, remap_key_event_with_profiles,
+        runner_dimensions, should_auto_fullscreen_for_game, should_forward_key_to_runner,
+        should_render_frame,
     };
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
@@ -3023,6 +4407,19 @@ mod tests {
         let bytes = wat::parse_str(wat)?;
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+
+    fn find_backup_dir(parent: &std::path::Path, prefix: &str) -> anyhow::Result<PathBuf> {
+        for entry in std::fs::read_dir(parent)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.starts_with(prefix) {
+                return Ok(path);
+            }
+        }
+        anyhow::bail!("backup directory not found for prefix {prefix}")
     }
 
     fn make_enforcer(prompt_sensitive_only: bool) -> AppCapabilityEnforcer {
@@ -3164,6 +4561,18 @@ mod tests {
                 locator: "file:///tmp/index.json".to_string(),
                 game_id: "snake-plus".to_string(),
                 version: Some("0.2.0".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_reinstall_launch_mode() {
+        let mode = parse_launch_mode(vec!["--reinstall".to_string(), "snake-plus".to_string()])
+            .expect("reinstall mode should parse");
+        assert_eq!(
+            mode,
+            LaunchMode::Operation(ContentOperation::Reinstall {
+                game_id: "snake-plus".to_string(),
             })
         );
     }
@@ -3574,6 +4983,83 @@ mod tests {
     }
 
     #[test]
+    fn parses_publisher_key_add_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--publisher-key-add".to_string(),
+            "dark-forest".to_string(),
+            "PUBLICKEY".to_string(),
+        ])
+        .expect("publisher-key-add should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::PublisherKeys(PublisherKeysCommand::Add {
+                publisher_id: "dark-forest".to_string(),
+                public_key_base64: "PUBLICKEY".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_keymap_import_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--keymap-import".to_string(),
+            "/tmp/keymap.json".to_string(),
+        ])
+        .expect("keymap-import should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Keymap(KeymapCommand::Import {
+                path: PathBuf::from("/tmp/keymap.json"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_keygen_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--keygen".to_string(),
+            "dark-forest".to_string(),
+            "--out-dir".to_string(),
+            "/tmp/keys".to_string(),
+        ])
+        .expect("keygen should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::Keygen {
+                publisher_id: "dark-forest".to_string(),
+                out_dir: PathBuf::from("/tmp/keys"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_sign_artifact_launch_mode() {
+        let mode = parse_launch_mode(vec![
+            "--sign-artifact".to_string(),
+            "/tmp/out/game.tar.gz".to_string(),
+            "--publisher-id".to_string(),
+            "dark-forest".to_string(),
+            "--private-key".to_string(),
+            "/tmp/keys/dark-forest.ed25519.pk8".to_string(),
+        ])
+        .expect("sign-artifact should parse");
+
+        assert_eq!(
+            mode,
+            LaunchMode::Creator(CreatorCommand::SignArtifact {
+                artifact_path: PathBuf::from("/tmp/out/game.tar.gz"),
+                publisher_id: "dark-forest".to_string(),
+                private_key_path: PathBuf::from("/tmp/keys/dark-forest.ed25519.pk8"),
+                metadata_path: None,
+                signature_out: None,
+            })
+        );
+    }
+
+    #[test]
     fn parses_permissions_list_launch_mode() {
         let mode = parse_launch_mode(vec!["--permissions-list".to_string()])
             .expect("permissions-list mode should parse");
@@ -3666,6 +5152,11 @@ mod tests {
             current_version: "0.1.0".to_string(),
             installed_versions: vec!["0.1.0".to_string()],
             version_checksums: std::collections::BTreeMap::new(),
+            artifact_uri: None,
+            checksum_sha256: None,
+            publisher_id: None,
+            signature_fingerprint: None,
+            verified_at: None,
         });
         store.save_installed(&installed)?;
         let after = compute_hotload_signature(store.root())?;
@@ -3838,6 +5329,34 @@ mod tests {
             .clone()
             .expect("pack should include metadata path");
 
+        let publisher_id = "test-publisher".to_string();
+        let keygen = execute_creator_command(CreatorCommand::Keygen {
+            publisher_id: publisher_id.clone(),
+            out_dir: root.join("keys"),
+        })?;
+        assert!(keygen.success);
+        let private_key_path = keygen
+            .private_key_path
+            .clone()
+            .expect("keygen should include private key path");
+        let public_key_base64 = keygen
+            .public_key_base64
+            .clone()
+            .expect("keygen should include public key");
+
+        let sign = execute_creator_command(CreatorCommand::SignArtifact {
+            artifact_path: artifact_path.clone(),
+            metadata_path: Some(metadata_path.clone()),
+            publisher_id: publisher_id.clone(),
+            private_key_path,
+            signature_out: None,
+        })?;
+        assert!(sign.success);
+        let metadata_path = sign
+            .metadata_path
+            .clone()
+            .expect("sign should include metadata path");
+
         let publish = execute_creator_command(CreatorCommand::Publish {
             artifact_path,
             metadata_path: Some(metadata_path),
@@ -3848,6 +5367,15 @@ mod tests {
         assert!(publish.success);
 
         let content_root = root.join("content");
+        let add_key = execute_publisher_keys_command(
+            content_root.clone(),
+            PublisherKeysCommand::Add {
+                publisher_id,
+                public_key_base64,
+            },
+        )?;
+        assert!(add_key.success);
+
         let install = execute_content_operation(
             content_root.clone(),
             ContentOperation::InstallIndex {
@@ -3897,6 +5425,231 @@ mod tests {
         assert!(listed.success);
         assert_eq!(listed.registry_locators, vec!["file:///tmp/index.json"]);
         Ok(())
+    }
+
+    #[test]
+    fn registry_command_reinitializes_legacy_schema_root() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("dark-forest");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{
+                "schema_version": 2,
+                "theme": "legacy-theme",
+                "performance_mode": "30"
+            }"#,
+        )?;
+
+        let report = execute_registry_command(root.clone(), RegistryCommand::List)?;
+        assert!(report.success);
+        assert!(report.registry_locators.is_empty());
+
+        let store = content::JsonContentStore::new(root);
+        let settings = store.load_settings()?;
+        assert_eq!(settings.schema_version, content::CURRENT_SCHEMA_VERSION);
+        assert_eq!(settings.theme, "forge");
+
+        let backup = find_backup_dir(temp.path(), "dark-forest.schema-v2-backup-")?;
+        let backup_settings = std::fs::read_to_string(backup.join("settings.json"))?;
+        assert!(backup_settings.contains("\"legacy-theme\""));
+        Ok(())
+    }
+
+    #[test]
+    fn publisher_key_commands_round_trip() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+
+        let add = execute_publisher_keys_command(
+            root.clone(),
+            PublisherKeysCommand::Add {
+                publisher_id: "dark-forest".to_string(),
+                public_key_base64: "cHVibGljLWtleQ==".to_string(),
+            },
+        )?;
+        assert!(add.success);
+        assert_eq!(add.keys, vec!["dark-forest".to_string()]);
+
+        let list = execute_publisher_keys_command(root.clone(), PublisherKeysCommand::List)?;
+        assert!(list.success);
+        assert_eq!(list.keys.len(), 1);
+        assert!(
+            list.keys[0].starts_with("dark-forest|fingerprint="),
+            "unexpected key list entry: {}",
+            list.keys[0]
+        );
+
+        let remove = execute_publisher_keys_command(
+            root,
+            PublisherKeysCommand::Remove {
+                publisher_id: "dark-forest".to_string(),
+            },
+        )?;
+        assert!(remove.success);
+        assert!(remove.keys.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn keymap_import_export_round_trip() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let import_path = temp.path().join("import-keymap.json");
+        let export_path = temp.path().join("export-keymap.json");
+
+        let mut profiles = content::KeymapProfilesFile {
+            active_profile: "vim".to_string(),
+            ..content::KeymapProfilesFile::default()
+        };
+        profiles.profiles.insert(
+            "vim".to_string(),
+            content::KeymapProfile {
+                bindings: [
+                    ("runner.pause".to_string(), "Space".to_string()),
+                    ("up".to_string(), "K".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        profiles.game_overrides.insert(
+            "snake-plus".to_string(),
+            [("runner.pause".to_string(), "Tab".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        std::fs::write(&import_path, serde_json::to_vec_pretty(&profiles)?)?;
+
+        let import_report = execute_keymap_command(
+            root.clone(),
+            KeymapCommand::Import {
+                path: import_path.clone(),
+            },
+        )?;
+        assert!(import_report.success);
+        assert_eq!(import_report.active_profile.as_deref(), Some("vim"));
+
+        let export_report = execute_keymap_command(
+            root.clone(),
+            KeymapCommand::Export {
+                path: export_path.clone(),
+            },
+        )?;
+        assert!(export_report.success);
+
+        let exported: content::KeymapProfilesFile =
+            serde_json::from_slice(&std::fs::read(&export_path)?)?;
+        assert_eq!(exported.active_profile, "vim");
+        assert_eq!(
+            exported
+                .profiles
+                .get("vim")
+                .and_then(|profile| profile.bindings.get("runner.pause"))
+                .map(String::as_str),
+            Some("Space")
+        );
+        assert_eq!(
+            exported
+                .game_overrides
+                .get("snake-plus")
+                .and_then(|overrides| overrides.get("runner.pause"))
+                .map(String::as_str),
+            Some("Tab")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn keymap_profile_switch_updates_mapping_live() {
+        let mut profiles = content::KeymapProfilesFile::default();
+        profiles.profiles.insert(
+            "vim".to_string(),
+            content::KeymapProfile {
+                bindings: [("runner.pause".to_string(), "Space".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+
+        let default_press = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+            &Route::Runner,
+            None,
+            Some("snake-plus"),
+            &profiles,
+            "default",
+        );
+        assert_eq!(default_press.code, KeyCode::Char(' '));
+
+        let vim_press = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+            &Route::Runner,
+            None,
+            Some("snake-plus"),
+            &profiles,
+            "vim",
+        );
+        assert_eq!(vim_press.code, KeyCode::Char('p'));
+
+        let suppressed_default = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()),
+            &Route::Runner,
+            None,
+            Some("snake-plus"),
+            &profiles,
+            "vim",
+        );
+        assert_eq!(suppressed_default.code, KeyCode::Null);
+    }
+
+    #[test]
+    fn per_game_override_only_applies_in_runner() {
+        let mut profiles = content::KeymapProfilesFile::default();
+        profiles.profiles.insert(
+            "vim".to_string(),
+            content::KeymapProfile {
+                bindings: [("runner.pause".to_string(), "Space".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        profiles.game_overrides.insert(
+            "snake-plus".to_string(),
+            [("runner.pause".to_string(), "Tab".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        let runner_override = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &Route::Runner,
+            None,
+            Some("snake-plus"),
+            &profiles,
+            "vim",
+        );
+        assert_eq!(runner_override.code, KeyCode::Char('p'));
+
+        let other_game = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &Route::Runner,
+            None,
+            Some("tetris-like"),
+            &profiles,
+            "vim",
+        );
+        assert_eq!(other_game.code, KeyCode::Tab);
+
+        let non_runner = remap_key_event_with_profiles(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &Route::Library,
+            None,
+            Some("snake-plus"),
+            &profiles,
+            "vim",
+        );
+        assert_eq!(non_runner.code, KeyCode::Tab);
     }
 
     #[test]
@@ -4166,6 +5919,11 @@ mod tests {
                 current_version: version.to_string(),
                 installed_versions: vec![version.to_string()],
                 version_checksums: std::collections::BTreeMap::new(),
+                artifact_uri: None,
+                checksum_sha256: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             }],
         };
         store.save_installed(&installed)?;
@@ -4221,6 +5979,11 @@ mod tests {
                 current_version: version.to_string(),
                 installed_versions: vec![version.to_string()],
                 version_checksums: std::collections::BTreeMap::new(),
+                artifact_uri: None,
+                checksum_sha256: None,
+                publisher_id: None,
+                signature_fingerprint: None,
+                verified_at: None,
             }],
         };
         store.save_installed(&installed)?;

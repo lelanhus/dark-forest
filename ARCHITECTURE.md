@@ -29,15 +29,18 @@ The project uses a Rust workspace with crate-oriented boundaries.
   - Local artifact staging and checksum validation
   - Atomic pointer switching (`games/<id>/current`)
   - Permissions grant persistence
+  - Publisher keyring and keymap profile persistence
+  - Schema-reset policy for legacy on-disk versions (backup then reinitialize)
 - `crates/registry`
   - Registry provider traits
   - Listing/resolve flows
-  - Provider adapters (`builtin://`, `index://`)
+  - Provider adapters (`builtin://`, `index://`, `github://`)
   - Optional catalog controls metadata (`controls_summary`) for UI-facing input hints
   - Tarball artifact fetch + unpack helpers
 - `crates/creator`
   - Template scaffolding for new WASM creator projects (`init-template`)
   - Creator-facing deterministic artifact packaging (`pack`)
+  - Publisher key generation + artifact signing (`keygen`, `sign-artifact`)
   - Artifact metadata generation and serialization
   - Artifact verification against metadata + embedded manifest
   - Local index publication flow (`publish`) for creator artifacts
@@ -55,6 +58,8 @@ The project uses a Rust workspace with crate-oriented boundaries.
 - Built-in native games are trusted.
 - Third-party games are sandboxed WASM by default.
 - Process plugins are off by default and require explicit opt-in.
+- Third-party marketplace installs must pass checksum + signature verification against a trusted
+  local publisher keyring.
 
 ## Core Built-ins
 
@@ -71,6 +76,7 @@ Policy gates:
 - Third-party `entry_type=native` is rejected unless trust policy explicitly whitelists source.
 - Capability checks are performed at host boundary, never delegated to plugin self-declaration.
 - Third-party `entry_type=process` remains disabled by default policy.
+- When process plugins are enabled, launch requires explicit warning confirmation.
 
 ## Async and Concurrency Model
 
@@ -110,6 +116,7 @@ Policy gates:
   - terminal capability detection
   - render timing indicators
   - install/update status and failures
+  - keymap/security/runtime setting states
 
 ## Quality and Safety Constraints
 

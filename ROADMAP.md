@@ -21,7 +21,8 @@ Source of product scope: `SPEC.md`.
 - M5 First Remote Provider (`v0.3`): Complete
 - M6 Permission Enforcement and WASM Plugins (`v1.0`): Complete
 - M7 Creator Tooling (`v1.1+`): Complete
-- M8+ : Pending
+- M8 Marketplace Maturity (`v2.0`): Complete
+- M9 Console OS Maturity (`v3.0+`): Pending
 
 ## M0 - Foundation (Complete)
 
@@ -168,16 +169,39 @@ Dependencies:
 
 - M6.
 
-## M8 - Marketplace Maturity (v2.0+, Pending)
+## M8 - Marketplace Maturity (v2.0, Complete)
 
 Objective: high-trust multi-source marketplace.
 
-Planned exit criteria:
+Exit criteria met:
 
 - Multi-registry support is stable.
 - Verified publisher and signature workflows in place.
 - Compatibility badges and collections operational.
 - Reproducible install flow documented.
+
+Delivered:
+
+- Registry/provider model supports both `index://` and `github://` sources with shared list/resolve
+  dispatch and cache fallback.
+- Install pipeline enforces signed third-party artifacts:
+  - required `artifact_sha256`
+  - detached signature fetch (`signature_uri`)
+  - trusted publisher key lookup
+  - Ed25519 signature verification
+- Creator tooling supports signing workflows:
+  - `--keygen`
+  - `--sign-artifact`
+  - publish requires signed metadata
+- Provenance is persisted for reproducibility (`artifact_uri`, checksum, publisher, fingerprint,
+  verified timestamp) and used by reinstall.
+- Marketplace UX surfaces trust/source/compatibility metadata plus filter facets and hot-reload
+  decision prompts.
+- Settings includes keymap profile selection, security toggles, registry visibility, and diagnostics.
+- Keymap runtime behavior honors precedence:
+  - per-game override > active profile > default profile
+  - per-game overrides apply only in runner context
+- Error modal clipboard copy is gated by settings and platform support.
 
 Dependencies:
 

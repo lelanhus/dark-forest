@@ -14,6 +14,7 @@ ratatui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde_json.workspace = true
 content = { path = "../content" }
 creator = { path = "../creator" }
 diagnostics = { path = "../diagnostics" }
@@ -25,7 +26,6 @@ theme = { path = "../theme" }
 plugin-host = { path = "../plugin-host" }
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile = "3.17"
 wat = "1.0"
 
