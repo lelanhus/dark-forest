@@ -10,13 +10,19 @@ const FIELD_H: i16 = 24;
 const ALIEN_ROWS: usize = 5;
 const ALIEN_COLS: usize = 11;
 const BULLET_STEP_MS: u32 = 50;
+const BASE_PLAYER_COOLDOWN_MS: u32 = 180;
+const RAPID_FIRE_COOLDOWN_MS: u32 = 80;
+const RAPID_FIRE_DURATION_MS: u32 = 6000;
+const BASE_PLAYER_MAX_SHOTS: usize = 1;
+const RAPID_FIRE_MAX_SHOTS: usize = 3;
+const UFO_MOVE_INTERVAL_MS: u32 = 120;
+const POWER_UP_FALL_INTERVAL_MS: u32 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bullet {
     x: i16,
     y: i16,
     dy: i16,
-    from_player: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +36,42 @@ struct ShieldCell {
 struct Ufo {
     x: i16,
     dir: i16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerUpKind {
+    RapidFire,
+    ShieldRepair,
+}
+
+impl PowerUpKind {
+    fn next(self) -> Self {
+        match self {
+            Self::RapidFire => Self::ShieldRepair,
+            Self::ShieldRepair => Self::RapidFire,
+        }
+    }
+
+    fn glyph(self) -> char {
+        match self {
+            Self::RapidFire => 'R',
+            Self::ShieldRepair => 'S',
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::RapidFire => Color::LightRed,
+            Self::ShieldRepair => Color::LightCyan,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PowerUpDrop {
+    x: i16,
+    y: i16,
+    kind: PowerUpKind,
 }
 
 #[derive(Debug)]
@@ -50,6 +92,11 @@ pub struct GalacticInvadersGame {
     shields: Vec<ShieldCell>,
     ufo: Option<Ufo>,
     ufo_spawn_accum_ms: u32,
+    ufo_move_accum_ms: u32,
+    power_up_drop: Option<PowerUpDrop>,
+    power_up_fall_accum_ms: u32,
+    next_ufo_power_up: PowerUpKind,
+    rapid_fire_ms: u32,
     score: i64,
     lives: i16,
     wave: u32,
@@ -75,6 +122,11 @@ impl GalacticInvadersGame {
             shields: Vec::new(),
             ufo: None,
             ufo_spawn_accum_ms: 0,
+            ufo_move_accum_ms: 0,
+            power_up_drop: None,
+            power_up_fall_accum_ms: 0,
+            next_ufo_power_up: PowerUpKind::RapidFire,
+            rapid_fire_ms: 0,
             score: 0,
             lives: 3,
             wave: 1,
@@ -111,9 +163,48 @@ impl GalacticInvadersGame {
         self.enemy_bullets.clear();
         self.ufo = None;
         self.ufo_spawn_accum_ms = 0;
+        self.ufo_move_accum_ms = 0;
+        self.power_up_drop = None;
+        self.power_up_fall_accum_ms = 0;
         self.player_x = FIELD_W / 2;
         self.player_cooldown_ms = 0;
         self.reset_shields();
+    }
+
+    fn player_fire_cooldown_ms(&self) -> u32 {
+        if self.rapid_fire_ms > 0 {
+            RAPID_FIRE_COOLDOWN_MS
+        } else {
+            BASE_PLAYER_COOLDOWN_MS
+        }
+    }
+
+    fn max_player_shots(&self) -> usize {
+        if self.rapid_fire_ms > 0 {
+            RAPID_FIRE_MAX_SHOTS
+        } else {
+            BASE_PLAYER_MAX_SHOTS
+        }
+    }
+
+    fn enemy_shot_cadence_ms(&self) -> u32 {
+        let total = u32::try_from(ALIEN_ROWS * ALIEN_COLS).unwrap_or(0);
+        let live = u32::try_from(self.live_aliens()).unwrap_or(0);
+        let eliminated = total.saturating_sub(live);
+        let wave_pressure = self.wave.saturating_sub(1).saturating_mul(24);
+        let swarm_pressure = eliminated.saturating_mul(4);
+        420_u32
+            .saturating_sub(wave_pressure.saturating_add(swarm_pressure))
+            .max(110)
+    }
+
+    fn current_move_interval_ms(&self) -> u32 {
+        let total = u32::try_from(ALIEN_ROWS * ALIEN_COLS).unwrap_or(0);
+        let live = u32::try_from(self.live_aliens()).unwrap_or(0);
+        let eliminated = total.saturating_sub(live);
+        self.move_interval_ms
+            .saturating_sub(eliminated.saturating_mul(4))
+            .max(70)
     }
 
     fn live_aliens(&self) -> usize {
@@ -168,16 +259,7 @@ impl GalacticInvadersGame {
         }
     }
 
-    fn maybe_enemy_shoot(&mut self) {
-        self.enemy_shot_accum_ms = self.enemy_shot_accum_ms.saturating_add(16);
-        let cadence = 360_u32
-            .saturating_sub(self.wave.saturating_sub(1).saturating_mul(20))
-            .max(160);
-        if self.enemy_shot_accum_ms < cadence {
-            return;
-        }
-        self.enemy_shot_accum_ms = 0;
-
+    fn shoot_enemy_bullet(&mut self) {
         let mut eligible = Vec::new();
         for col in 0..ALIEN_COLS {
             for row in (0..ALIEN_ROWS).rev() {
@@ -198,8 +280,16 @@ impl GalacticInvadersGame {
             x: self.formation_x + i16::try_from(col).unwrap_or(0) * 2,
             y: self.formation_y + i16::try_from(row).unwrap_or(0) + 1,
             dy: 1,
-            from_player: false,
         });
+    }
+
+    fn maybe_enemy_shoot(&mut self, dt_ms: u32) {
+        self.enemy_shot_accum_ms = self.enemy_shot_accum_ms.saturating_add(dt_ms);
+        let cadence = self.enemy_shot_cadence_ms();
+        while self.enemy_shot_accum_ms >= cadence {
+            self.enemy_shot_accum_ms = self.enemy_shot_accum_ms.saturating_sub(cadence);
+            self.shoot_enemy_bullet();
+        }
     }
 
     fn maybe_spawn_ufo(&mut self, dt_ms: u32) {
@@ -214,6 +304,77 @@ impl GalacticInvadersGame {
             x: if spawn_left { 1 } else { FIELD_W - 2 },
             dir: if spawn_left { 1 } else { -1 },
         });
+    }
+
+    fn step_ufo(&mut self, dt_ms: u32) {
+        if self.ufo.is_none() {
+            self.ufo_move_accum_ms = 0;
+            return;
+        }
+
+        self.ufo_move_accum_ms = self.ufo_move_accum_ms.saturating_add(dt_ms);
+        while self.ufo_move_accum_ms >= UFO_MOVE_INTERVAL_MS {
+            self.ufo_move_accum_ms = self.ufo_move_accum_ms.saturating_sub(UFO_MOVE_INTERVAL_MS);
+            if let Some(mut ufo) = self.ufo {
+                ufo.x += ufo.dir;
+                if ufo.x <= 0 || ufo.x >= FIELD_W - 1 {
+                    self.ufo = None;
+                    self.ufo_move_accum_ms = 0;
+                    break;
+                }
+                self.ufo = Some(ufo);
+            }
+        }
+    }
+
+    fn queue_ufo_power_up_drop(&mut self, x: i16) {
+        let kind = self.next_ufo_power_up;
+        self.next_ufo_power_up = self.next_ufo_power_up.next();
+        self.power_up_drop = Some(PowerUpDrop { x, y: 2, kind });
+        self.power_up_fall_accum_ms = 0;
+    }
+
+    fn apply_power_up(&mut self, kind: PowerUpKind) {
+        match kind {
+            PowerUpKind::RapidFire => {
+                self.rapid_fire_ms = RAPID_FIRE_DURATION_MS;
+            }
+            PowerUpKind::ShieldRepair => self.reset_shields(),
+        }
+    }
+
+    fn clear_active_powerups(&mut self) {
+        self.rapid_fire_ms = 0;
+        self.power_up_drop = None;
+        self.power_up_fall_accum_ms = 0;
+    }
+
+    fn step_power_up_drop(&mut self, dt_ms: u32) {
+        let Some(mut drop) = self.power_up_drop else {
+            self.power_up_fall_accum_ms = 0;
+            return;
+        };
+
+        self.power_up_fall_accum_ms = self.power_up_fall_accum_ms.saturating_add(dt_ms);
+        while self.power_up_fall_accum_ms >= POWER_UP_FALL_INTERVAL_MS {
+            self.power_up_fall_accum_ms = self
+                .power_up_fall_accum_ms
+                .saturating_sub(POWER_UP_FALL_INTERVAL_MS);
+            drop.y = drop.y.saturating_add(1);
+
+            if drop.y >= FIELD_H - 1 {
+                self.power_up_drop = None;
+                return;
+            }
+
+            if drop.y == FIELD_H - 2 && drop.x == self.player_x {
+                self.apply_power_up(drop.kind);
+                self.power_up_drop = None;
+                return;
+            }
+        }
+
+        self.power_up_drop = Some(drop);
     }
 
     fn damage_shield(&mut self, x: i16, y: i16) -> bool {
@@ -247,18 +408,14 @@ impl GalacticInvadersGame {
         let mut next_player = Vec::new();
         let player_bullets = std::mem::take(&mut self.player_bullets);
         for bullet in player_bullets {
-            if let Some(mut ufo) = self.ufo {
-                if bullet.y == 1 && bullet.x == ufo.x {
-                    self.score = self.score.saturating_add(150);
-                    self.ufo = None;
-                    continue;
-                }
-                ufo.x += ufo.dir;
-                if ufo.x <= 0 || ufo.x >= FIELD_W - 1 {
-                    self.ufo = None;
-                } else {
-                    self.ufo = Some(ufo);
-                }
+            if let Some(ufo) = self.ufo
+                && bullet.y == 1
+                && bullet.x == ufo.x
+            {
+                self.score = self.score.saturating_add(150);
+                self.queue_ufo_power_up_drop(ufo.x);
+                self.ufo = None;
+                continue;
             }
 
             if self.damage_shield(bullet.x, bullet.y) {
@@ -314,6 +471,7 @@ impl GalacticInvadersGame {
             self.player_bullets.clear();
             self.enemy_bullets.clear();
             self.player_x = FIELD_W / 2;
+            self.clear_active_powerups();
             if self.lives <= 0 {
                 self.finished = true;
             }
@@ -326,14 +484,22 @@ impl GalacticInvadersGame {
         }
 
         self.player_cooldown_ms = self.player_cooldown_ms.saturating_sub(dt_ms);
+        self.rapid_fire_ms = self.rapid_fire_ms.saturating_sub(dt_ms);
+
         self.move_accum_ms = self.move_accum_ms.saturating_add(dt_ms);
-        while self.move_accum_ms >= self.move_interval_ms {
-            self.move_accum_ms = self.move_accum_ms.saturating_sub(self.move_interval_ms);
+        loop {
+            let interval = self.current_move_interval_ms();
+            if self.move_accum_ms < interval {
+                break;
+            }
+            self.move_accum_ms = self.move_accum_ms.saturating_sub(interval);
             self.move_formation();
         }
 
         self.maybe_spawn_ufo(dt_ms);
-        self.maybe_enemy_shoot();
+        self.step_ufo(dt_ms);
+        self.maybe_enemy_shoot(dt_ms);
+        self.step_power_up_drop(dt_ms);
 
         self.bullet_accum_ms = self.bullet_accum_ms.saturating_add(dt_ms);
         while self.bullet_accum_ms >= BULLET_STEP_MS {
@@ -352,7 +518,7 @@ impl GalacticInvadersGame {
         if self.live_aliens() == 0 {
             self.wave = self.wave.saturating_add(1);
             self.score = self.score.saturating_add(300);
-            self.move_interval_ms = self.move_interval_ms.saturating_sub(40).max(120);
+            self.move_interval_ms = self.move_interval_ms.saturating_sub(30).max(110);
             self.reset_wave();
         }
     }
@@ -366,14 +532,15 @@ impl GalacticInvadersGame {
                 self.player_x = self.player_x.saturating_add(1).min(FIELD_W - 2);
             }
             KeyCode::Char(' ') => {
-                if self.player_cooldown_ms == 0 {
+                if self.player_cooldown_ms == 0
+                    && self.player_bullets.len() < self.max_player_shots()
+                {
                     self.player_bullets.push(Bullet {
                         x: self.player_x,
                         y: FIELD_H - 3,
                         dy: -1,
-                        from_player: true,
                     });
-                    self.player_cooldown_ms = 170;
+                    self.player_cooldown_ms = self.player_fire_cooldown_ms();
                 }
             }
             _ => {}
@@ -396,6 +563,8 @@ impl Game for GalacticInvadersGame {
         self.wave = 1;
         self.finished = false;
         self.move_interval_ms = 420;
+        self.next_ufo_power_up = PowerUpKind::RapidFire;
+        self.clear_active_powerups();
         self.reset_wave();
         Ok(())
     }
@@ -437,9 +606,16 @@ impl Game for GalacticInvadersGame {
             return;
         }
 
+        let buff_status = if self.rapid_fire_ms > 0 {
+            let secs = self.rapid_fire_ms / 1000;
+            let tenths = (self.rapid_fire_ms % 1000) / 100;
+            format!("BUFF:RAPID({secs}.{tenths}s)")
+        } else {
+            "BUFF:NONE".to_string()
+        };
         let status = format!(
-            "GALACTIC INVADERS  SCORE:{}  LIVES:{}  WAVE:{}",
-            self.score, self.lives, self.wave
+            "GALACTIC INVADERS  SCORE:{}  LIVES:{}  WAVE:{}  {}",
+            self.score, self.lives, self.wave, buff_status
         );
         for (idx, ch) in status.chars().enumerate() {
             let x = u16::try_from(idx).unwrap_or(0);
@@ -543,6 +719,18 @@ impl Game for GalacticInvadersGame {
             );
         }
 
+        if let Some(drop) = self.power_up_drop {
+            frame.set(
+                u16::try_from(ox + drop.x).unwrap_or(0),
+                u16::try_from(oy + drop.y).unwrap_or(0),
+                Cell {
+                    glyph: drop.kind.glyph(),
+                    fg: drop.kind.color(),
+                    ..Cell::default()
+                },
+            );
+        }
+
         frame.set(
             u16::try_from(ox + self.player_x).unwrap_or(0),
             u16::try_from(oy + FIELD_H - 2).unwrap_or(0),
@@ -582,7 +770,9 @@ impl Game for GalacticInvadersGame {
 
 #[cfg(test)]
 mod tests {
-    use super::GalacticInvadersGame;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{Bullet, GalacticInvadersGame, PowerUpKind, RAPID_FIRE_DURATION_MS};
     use runtime::{Game, InitCtx, RuntimeEvent, UpdateCtx};
 
     fn init_game(seed: u64) -> GalacticInvadersGame {
@@ -596,6 +786,20 @@ mod tests {
         game
     }
 
+    fn space_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty())
+    }
+
+    fn frame_row_text(frame: &runtime::Frame, y: u16) -> String {
+        let mut text = String::new();
+        for x in 0..frame.width {
+            if let Some(cell) = frame.get(x, y) {
+                text.push(cell.glyph);
+            }
+        }
+        text
+    }
+
     #[test]
     fn player_shot_scores_when_hitting_alien() {
         let mut game = init_game(5);
@@ -604,11 +808,10 @@ mod tests {
         game.formation_x = game.player_x;
         game.formation_y = 4;
         game.shields.clear();
-        game.player_bullets.push(super::Bullet {
+        game.player_bullets.push(Bullet {
             x: game.formation_x,
             y: game.formation_y + 1,
             dy: -1,
-            from_player: true,
         });
         game.step_bullets();
 
@@ -647,5 +850,116 @@ mod tests {
         assert_eq!(a.enemy_bullets, b.enemy_bullets);
         assert_eq!(a.ufo, b.ufo);
         assert_eq!(a.score, b.score);
+    }
+
+    #[test]
+    fn ufo_moves_without_player_bullets() {
+        let mut game = init_game(13);
+        game.ufo = Some(super::Ufo { x: 6, dir: 1 });
+        game.ufo_move_accum_ms = 0;
+        game.player_bullets.clear();
+
+        game.tick(super::UFO_MOVE_INTERVAL_MS + 1);
+
+        assert_eq!(game.ufo, Some(super::Ufo { x: 7, dir: 1 }));
+    }
+
+    #[test]
+    fn enemy_fire_cadence_uses_real_dt() {
+        let mut coarse = init_game(55);
+        let mut fine = init_game(55);
+        coarse.enemy_bullets.clear();
+        fine.enemy_bullets.clear();
+        coarse.enemy_shot_accum_ms = 0;
+        fine.enemy_shot_accum_ms = 0;
+
+        for _ in 0..20 {
+            coarse.maybe_enemy_shoot(40);
+        }
+        for _ in 0..50 {
+            fine.maybe_enemy_shoot(16);
+        }
+
+        assert_eq!(coarse.enemy_bullets, fine.enemy_bullets);
+        assert_eq!(coarse.enemy_shot_accum_ms, fine.enemy_shot_accum_ms);
+    }
+
+    #[test]
+    fn base_fire_model_limits_to_single_active_player_shot() {
+        let mut game = init_game(17);
+        game.player_cooldown_ms = 0;
+        game.player_bullets.push(Bullet {
+            x: game.player_x,
+            y: super::FIELD_H - 4,
+            dy: -1,
+        });
+
+        game.handle_input(space_key());
+
+        assert_eq!(game.player_bullets.len(), 1);
+    }
+
+    #[test]
+    fn rapid_fire_temporarily_allows_three_concurrent_shots_and_expires() {
+        let mut game = init_game(21);
+        game.rapid_fire_ms = RAPID_FIRE_DURATION_MS;
+        game.player_bullets.clear();
+
+        for _ in 0..4 {
+            game.player_cooldown_ms = 0;
+            game.handle_input(space_key());
+        }
+        assert_eq!(game.player_bullets.len(), 3);
+
+        game.tick(RAPID_FIRE_DURATION_MS);
+        assert_eq!(game.rapid_fire_ms, 0);
+    }
+
+    #[test]
+    fn shield_repair_restores_bunkers_to_baseline() {
+        let mut game = init_game(34);
+        let baseline = game.shields.len();
+        let target = game.shields[0];
+
+        assert!(game.damage_shield(target.x, target.y));
+        assert!(game.damage_shield(target.x, target.y));
+        assert!(game.shields.len() < baseline);
+
+        game.apply_power_up(PowerUpKind::ShieldRepair);
+
+        assert_eq!(game.shields.len(), baseline);
+    }
+
+    #[test]
+    fn player_hit_clears_active_powerups_and_pending_drop() {
+        let mut game = init_game(89);
+        game.rapid_fire_ms = 2000;
+        game.power_up_drop = Some(super::PowerUpDrop {
+            x: game.player_x,
+            y: super::FIELD_H - 4,
+            kind: PowerUpKind::RapidFire,
+        });
+        game.enemy_bullets.push(Bullet {
+            x: game.player_x,
+            y: super::FIELD_H - 3,
+            dy: 1,
+        });
+
+        game.step_bullets();
+
+        assert_eq!(game.rapid_fire_ms, 0);
+        assert!(game.power_up_drop.is_none());
+    }
+
+    #[test]
+    fn status_banner_displays_active_powerup_timer() {
+        let mut game = init_game(1234);
+        game.rapid_fire_ms = 5500;
+        let mut frame = runtime::Frame::new(90, 34);
+
+        game.render(&mut frame);
+        let top_row = frame_row_text(&frame, 0);
+
+        assert!(top_row.contains("BUFF:RAPID"));
     }
 }

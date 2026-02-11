@@ -55,8 +55,13 @@
       ],
       "expect": {
         "contains": [
-          "Runner HUD",
-          "Game: galactic-invaders | running"
+          "galactic-invaders | running",
+          "GALACTIC INVADERS",
+          "SCORE:",
+          "WAVE:"
+        ],
+        "not_contains": [
+          "TERMINAL TOO SMALL FOR GALACTIC INVADERS"
         ]
       }
     },
@@ -69,7 +74,13 @@
       ],
       "expect": {
         "contains": [
-          "Game: galactic-invaders | running"
+          "galactic-invaders | running",
+          "GALACTIC INVADERS",
+          "SCORE:",
+          "WAVE:"
+        ],
+        "not_contains": [
+          "TERMINAL TOO SMALL FOR GALACTIC INVADERS"
         ]
       }
     },
@@ -92,8 +103,13 @@
       ],
       "expect": {
         "contains": [
-          "Runner HUD",
-          "Game: galactic-invaders | running"
+          "galactic-invaders | running",
+          "GALACTIC INVADERS",
+          "SCORE:",
+          "WAVE:"
+        ],
+        "not_contains": [
+          "TERMINAL TOO SMALL FOR GALACTIC INVADERS"
         ]
       }
     },

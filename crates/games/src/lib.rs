@@ -134,7 +134,8 @@ pub fn builtin_catalog() -> Vec<GameListing> {
             permissions_summary: vec!["terminal.raw_input".to_string()],
             controls_summary: vec![
                 "Move: Left/Right or A/D".to_string(),
-                "Fire: Space".to_string(),
+                "Fire: Space (single-shot base)".to_string(),
+                "UFO drops alternate power-ups: Rapid Fire, Shield Repair".to_string(),
             ],
             host_api_range: "^0.1".to_string(),
             entry_type: EntryType::Native,

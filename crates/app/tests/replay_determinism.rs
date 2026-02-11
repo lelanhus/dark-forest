@@ -36,6 +36,7 @@ fn tetris_replay_is_deterministic() -> Result<()> {
     assert_eq!(first.frame_hash, second.frame_hash);
     assert_eq!(first.score, second.score);
     assert_eq!(first.finished, second.finished);
+    assert!(first.score > 0);
     Ok(())
 }
 

@@ -281,6 +281,17 @@ Tetris-like quality bar:
   clear/spin/combo/B2B/perfect-clear outcomes
 * default runner behavior launches Tetris-like in fullscreen to avoid 20-row clipping on common terminal sizes
 
+Galactic Invaders quality bar:
+
+* default fire model is single-shot pressure (`max player bullets = 1`)
+* UFO kills alternate deterministic power-up drops (`Rapid Fire`, then `Shield Repair`)
+* rapid fire is timed and displays remaining duration in the in-game status banner
+* shield repair restores bunker layout to full baseline durability
+* enemy shot cadence and formation pressure scale by wave and remaining alien count
+* enemy shot cadence uses real `dt_ms` timing accumulation
+* default runner behavior launches Galactic Invaders in fullscreen to avoid low-height pane
+  clipping on common terminal sizes
+
 ---
 
 ## 9) Content system: installs, updates, rollback, integrity
