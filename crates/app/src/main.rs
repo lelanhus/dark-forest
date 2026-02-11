@@ -707,7 +707,11 @@ fn runner_dimensions(terminal_w: u16, terminal_h: u16, fullscreen: bool) -> (u16
 }
 
 fn should_auto_fullscreen_for_game(game_id: &str) -> bool {
-    game_id == games::TETRIS_ID
+    game_id == games::TETRIS_ID || game_id == games::GALACTIC_INVADERS_ID
+}
+
+fn prime_runner_frame_after_start(runner: &mut RuntimeRunner) {
+    let _ = runner.render();
 }
 
 fn should_forward_key_to_runner(
@@ -3599,6 +3603,7 @@ impl AppModel {
                     self.shell.set_error(format!("failed to start game: {err}"));
                     return;
                 }
+                prime_runner_frame_after_start(&mut self.runner);
                 self.shell.route = Route::Runner;
                 self.shell.overlay = None;
                 self.current_game_id = Some(game_id.to_string());
@@ -4358,10 +4363,14 @@ mod tests {
         create_game_instance, disable_keyboard_enhancements, enable_keyboard_enhancements,
         execute_content_operation, execute_creator_command, execute_keymap_command,
         execute_permissions_command, execute_publisher_keys_command, execute_registry_command,
-        load_marketplace_catalog, parse_launch_mode, remap_key_event_with_profiles,
-        runner_dimensions, should_auto_fullscreen_for_game, should_forward_key_to_runner,
-        should_render_frame,
+        load_marketplace_catalog, parse_launch_mode, prime_runner_frame_after_start,
+        remap_key_event_with_profiles, runner_dimensions, should_auto_fullscreen_for_game,
+        should_forward_key_to_runner, should_render_frame,
     };
+
+    fn frame_has_non_space_cells(frame: &runtime::Frame) -> bool {
+        frame.cells.iter().any(|cell| cell.glyph != ' ')
+    }
 
     fn write_sample_wasm(path: &std::path::Path) -> anyhow::Result<()> {
         let wat = r#"
@@ -5126,7 +5135,28 @@ mod tests {
     #[test]
     fn tetris_auto_fullscreen_policy_is_scoped() {
         assert!(should_auto_fullscreen_for_game("tetris-like"));
+        assert!(should_auto_fullscreen_for_game("galactic-invaders"));
         assert!(!should_auto_fullscreen_for_game("snake-plus"));
+    }
+
+    #[test]
+    fn start_path_primes_first_runner_frame() -> anyhow::Result<()> {
+        let mut runner = runtime::RuntimeRunner::new(76, 16);
+        let game = games::instantiate(games::MAZE_CHASE_ID, 11)?;
+        runner.start(game, 11)?;
+
+        assert!(
+            !frame_has_non_space_cells(runner.current_frame()),
+            "runner frame should begin blank before priming"
+        );
+
+        prime_runner_frame_after_start(&mut runner);
+
+        assert!(
+            frame_has_non_space_cells(runner.current_frame()),
+            "runner frame should be rendered immediately after priming"
+        );
+        Ok(())
     }
 
     #[test]

@@ -6,6 +6,34 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Galactic Invaders hardcore progression updates:
+  - deterministic UFO power-up drops alternating `Rapid Fire` and `Shield Repair`
+  - rapid-fire timed buff with status-banner timer display
+  - shield-repair effect that restores bunker durability to baseline
+- New Galactic Invaders unit coverage for:
+  - UFO movement independent of player bullets
+  - `dt_ms`-accurate enemy fire cadence
+  - single-shot base-fire constraints
+  - rapid-fire expiry behavior
+  - power-up reset on player life loss
+  - status banner power-up rendering
+
+### Changed
+
+- Runner startup now primes an initial game frame immediately after launch to avoid blank first-frame
+  presentation in pane mode.
+- Auto-fullscreen startup policy now applies to Galactic Invaders in addition to Tetris-like.
+- Galactic Invaders gameplay pacing now scales using wave plus remaining-alien pressure for both
+  formation movement and enemy fire cadence.
+- Galactic Invaders controls summary now explicitly documents single-shot base fire and UFO power-up behavior.
+- `tests/ptybox/actions/game_galactic_invaders.json` now asserts visible in-game markers
+  (`GALACTIC INVADERS`, `SCORE:`, `WAVE:`) and rejects terminal-size warning fallback output during
+  active play.
+- `fixtures/replays/galactic-invaders-seed-777.json` now reflects tuned hardcore gameplay and
+  produces a non-zero deterministic score baseline.
+
 ## [2.0.0] - 2026-02-10
 
 ### Added
