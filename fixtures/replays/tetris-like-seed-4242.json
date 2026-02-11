@@ -1,0 +1,28 @@
+{
+  "game_id": "tetris-like",
+  "seed": 4242,
+  "width": 78,
+  "height": 22,
+  "events": [
+    {"type": "input", "key": "x"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Space"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "c"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Left"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "z"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Down"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Space"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Right"},
+    {"type": "tick", "dt_ms": 16},
+    {"type": "input", "key": "Space"},
+    {"type": "tick", "dt_ms": 16}
+  ]
+}
