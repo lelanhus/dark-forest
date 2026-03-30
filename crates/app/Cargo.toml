@@ -26,8 +26,8 @@ theme = { path = "../theme" }
 plugin-host = { path = "../plugin-host" }
 
 [dev-dependencies]
-tempfile = "3.17"
-wat = "1.0"
+tempfile = "3.27"
+wat = "1.245"
 
 [lints]
 workspace = true

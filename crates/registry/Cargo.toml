@@ -19,8 +19,8 @@ plugin-host = { path = "../plugin-host" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [dev-dependencies]
-proptest = "1.6"
-tempfile = "3.17"
+proptest = "1.11"
+tempfile = "3.27"
 
 [lints]
 workspace = true
