@@ -14,8 +14,8 @@ runtime = { path = "../runtime" }
 wasmtime = { version = "41.0.3", default-features = false, features = ["cranelift", "runtime", "wat"] }
 
 [dev-dependencies]
-tempfile = "3.17"
-wat = "1.0"
+tempfile = "3.27"
+wat = "1.246"
 
 [lints]
 workspace = true
